@@ -24,7 +24,7 @@ import (
 
 const (
 	composeFile = "docker-compose.yml"
-	outlineURL  = "http://127.0.0.1:13000"
+	outlineURL  = "http://localhost:13000"
 	keycloakURL = "http://127.0.0.1:18080"
 	realm       = "e2e"
 	rolesClient = "roles-client"
@@ -129,6 +129,72 @@ func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 				t.Fatalf("the %s Keycloak fetch changed Outline state:\nbefore:\n%s\nafter:\n%s", name, before, after)
 			}
 		}
+	})
+
+	t.Run("sso admin claims the installation admin and mints an api key", func(t *testing.T) {
+		accessToken := s.login(t, "admin-sso", "admin-password")
+
+		var info struct {
+			User struct {
+				Email string `json:"email"`
+				Role  string `json:"role"`
+			} `json:"user"`
+		}
+		s.outlineWithToken(t, accessToken, "auth.info", map[string]any{}, &info)
+		if info.User.Email != "admin@example.com" || info.User.Role != "admin" {
+			t.Fatalf("the SSO session did not claim the installation admin: %+v", info.User)
+		}
+
+		var users []struct {
+			ID string `json:"id"`
+		}
+		s.outline(t, "users.list", map[string]any{"emails": []string{"admin@example.com"}}, &users)
+		if len(users) != 1 {
+			t.Fatalf("expected the SSO login to claim the one admin account, found %d", len(users))
+		}
+
+		var created struct {
+			Value string `json:"value"`
+		}
+		s.outlineWithToken(t, accessToken, "apiKeys.create", map[string]any{"name": "sso-admin"}, &created)
+		if created.Value == "" {
+			t.Fatal("apiKeys.create from the SSO session returned no key")
+		}
+
+		output := s.mustRunSync(t, map[string]string{"OUTLINE_TOKEN": created.Value})
+		if !strings.Contains(output, `"failures":0`) {
+			t.Fatalf("the service did not accept the SSO-minted API key:\n%s", output)
+		}
+	})
+
+	t.Run("sso first login jit creates the account and the next Sync Run adds it", func(t *testing.T) {
+		var before []struct {
+			ID string `json:"id"`
+		}
+		s.outline(t, "users.list", map[string]any{"emails": []string{"jane@example.com"}}, &before)
+		if len(before) != 0 {
+			t.Fatalf("jane already had an Outline Account before her first login")
+		}
+		s.assertMembers(t, "team-sso")
+
+		accessToken := s.login(t, "jane", "jane-password")
+
+		var info struct {
+			User struct {
+				ID    string `json:"id"`
+				Email string `json:"email"`
+			} `json:"user"`
+		}
+		s.outlineWithToken(t, accessToken, "auth.info", map[string]any{}, &info)
+		if info.User.Email != "jane@example.com" {
+			t.Fatalf("the first SSO login created %q, want jane@example.com", info.User.Email)
+		}
+		s.accounts[info.User.ID] = "jane@example.com"
+
+		s.mustRunSync(t, nil)
+
+		s.assertManaged(t, "team-sso")
+		s.assertMembers(t, "team-sso", "jane@example.com")
 	})
 }
 
@@ -289,7 +355,12 @@ func (s *stack) seedOutline(t *testing.T) {
 
 func (s *stack) outline(t *testing.T, route string, payload any, out any) {
 	t.Helper()
-	resp := doRequest(t, http.MethodPost, outlineURL+"/api/"+route, s.apiKey, payload)
+	s.outlineWithToken(t, s.apiKey, route, payload, out)
+}
+
+func (s *stack) outlineWithToken(t *testing.T, token, route string, payload any, out any) {
+	t.Helper()
+	resp := doRequest(t, http.MethodPost, outlineURL+"/api/"+route, token, payload)
 	if resp.status != http.StatusOK {
 		t.Fatalf("Outline %s returned %d: %s", route, resp.status, resp.body)
 	}

@@ -29,10 +29,14 @@ The suite asserts, against real HTTP APIs:
 - an unmanaged Outline Group is never touched
 - a second run is a no-op (unchanged state, zeroed run summary)
 - an unreachable Keycloak and an unknown roles client both abort the run before any Outline write
+- a headless scripted SSO login (no browser) completes against Outline; the first login of an uninvited Keycloak user JIT-creates the Outline Account, and the next Sync Run adds it to its Managed Group
+- a Keycloak user matching the installation admin's email claims that admin account through SSO, and an API key minted from that session is accepted by the service — the documented production bootstrap
+
+The SSO login is pure HTTP: it starts at Outline's `/auth/oidc`, parses Keycloak's rendered login form, posts the credentials, and follows the callback. Connections to Keycloak's internal name are dialed at the published loopback port while the host header stays `keycloak:8080`, so Keycloak's token issuer matches what Outline expects on the server side.
 
 ## Requirements
 
 - Docker with Compose v2
-- A Linux host: the stack publishes Keycloak on `127.0.0.1:18080` and Outline on `127.0.0.1:13000` for the test client.
+- A Linux host: the stack publishes Keycloak on loopback port `18080` and Outline on loopback port `13000` for the test client.
 
-The SSO login scenarios are covered by #11; this suite seeds Outline accounts through the admin API instead.
+Accounts used by the membership scenarios are seeded through the admin API; the SSO scenarios above exercise the login path that creates accounts in production.
