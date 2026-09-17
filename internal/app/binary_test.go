@@ -1,13 +1,16 @@
 package app_test
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 var serviceBinary string
@@ -80,5 +83,50 @@ func TestServiceBinaryFailsFastOnMissingConfiguration(t *testing.T) {
 	}
 	if !strings.Contains(string(output), "OUTLINE_TOKEN") {
 		t.Fatalf("output does not name the missing setting:\n%s", output)
+	}
+}
+
+func TestServiceBinaryLogsFailedRunAndStopsOnSigterm(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	ol.failListGroups = 1
+
+	command := exec.Command(serviceBinary)
+	command.Env = append(serviceEnv(kc, ol), "SYNC_INTERVAL=10ms")
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		t.Fatalf("starting service: %v", err)
+	}
+
+	deadline := time.After(5 * time.Second)
+	for ol.listCalls() < 2 {
+		select {
+		case <-deadline:
+			command.Process.Kill()
+			_ = command.Wait()
+			t.Fatalf("service did not continue after a failed Sync Run; stderr:\n%s", stderr.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("sending SIGTERM: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- command.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("service did not exit cleanly on SIGTERM: %v\nstderr:\n%s", err, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		command.Process.Kill()
+		<-done
+		t.Fatalf("service did not exit within 5s of SIGTERM; stderr:\n%s", stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "sync run failed") {
+		t.Fatalf("stderr does not log the failed Sync Run:\n%s", stderr.String())
 	}
 }

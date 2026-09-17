@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -165,13 +166,17 @@ type outlineGroup struct {
 }
 
 type fakeOutline struct {
-	pageSize int
+	pageSize        int
+	listGroupsDelay time.Duration
+	failListGroups  int
 
-	mu       sync.Mutex
-	groups   []outlineGroup
-	counter  int
-	requests []recordedRequest
-	server   *httptest.Server
+	mu          sync.Mutex
+	groups      []outlineGroup
+	counter     int
+	requests    []recordedRequest
+	inFlight    int
+	maxInFlight int
+	server      *httptest.Server
 }
 
 func newFakeOutline(t *testing.T) *fakeOutline {
@@ -191,15 +196,15 @@ func (f *fakeOutline) seedGroups(groups ...outlineGroup) {
 }
 
 func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
 	recorded, err := recordRequest(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+
+	f.mu.Lock()
 	f.requests = append(f.requests, recorded)
+	f.mu.Unlock()
 
 	if recorded.Authorization != "Bearer "+testOutlineToken {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -220,6 +225,17 @@ func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeOutline) handleListGroups(w http.ResponseWriter, recorded recordedRequest) {
+	f.mu.Lock()
+	f.inFlight++
+	if f.inFlight > f.maxInFlight {
+		f.maxInFlight = f.inFlight
+	}
+	delay := f.listGroupsDelay
+	fail := f.failListGroups > 0
+	if fail {
+		f.failListGroups--
+	}
+
 	limit := intValue(recorded.JSON["limit"], 15)
 	offset := intValue(recorded.JSON["offset"], 0)
 	if limit <= 0 {
@@ -237,6 +253,22 @@ func (f *fakeOutline) handleListGroups(w http.ResponseWriter, recorded recordedR
 	for _, group := range f.groups[offset:end] {
 		groups = append(groups, presentGroup(group))
 	}
+	total := len(f.groups)
+	f.mu.Unlock()
+
+	if delay > 0 {
+		time.Sleep(delay)
+	}
+
+	f.mu.Lock()
+	f.inFlight--
+	f.mu.Unlock()
+
+	if fail {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"ok": false, "error": "Internal Server Error"})
+		return
+	}
 	writeJSON(w, map[string]any{
 		"ok": true,
 		"data": map[string]any{
@@ -246,7 +278,7 @@ func (f *fakeOutline) handleListGroups(w http.ResponseWriter, recorded recordedR
 		"pagination": map[string]int{
 			"limit":  limit,
 			"offset": offset,
-			"total":  len(f.groups),
+			"total":  total,
 		},
 	})
 }
@@ -259,14 +291,18 @@ func (f *fakeOutline) handleCreateGroup(w http.ResponseWriter, recorded recorded
 		writeJSON(w, map[string]any{"ok": false, "error": "name is required"})
 		return
 	}
+	f.mu.Lock()
 	f.counter++
 	group := outlineGroup{ID: fmt.Sprintf("created-group-%d", f.counter), Name: name, ExternalID: externalID}
 	f.groups = append(f.groups, group)
+	f.mu.Unlock()
 	writeJSON(w, map[string]any{"ok": true, "data": map[string]any{"group": presentGroup(group)}})
 }
 
 func (f *fakeOutline) handleUpdateGroup(w http.ResponseWriter, recorded recordedRequest) {
 	id, _ := recorded.JSON["id"].(string)
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	for i, group := range f.groups {
 		if group.ID != id {
 			continue
@@ -295,6 +331,24 @@ func (f *fakeOutline) allRequests() []recordedRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]recordedRequest(nil), f.requests...)
+}
+
+func (f *fakeOutline) maxListInFlight() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.maxInFlight
+}
+
+func (f *fakeOutline) listCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var calls int
+	for _, request := range f.requests {
+		if request.Path == "/api/groups.list" {
+			calls++
+		}
+	}
+	return calls
 }
 
 func (f *fakeOutline) writeRequests() []recordedRequest {
