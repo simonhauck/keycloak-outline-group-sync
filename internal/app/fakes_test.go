@@ -42,10 +42,27 @@ type keycloakClientRep struct {
 	ClientID string
 }
 
+type keycloakUser struct {
+	ID          string
+	Username    string
+	Email       string
+	Enabled     bool
+	DirectRoles []string
+}
+
+type keycloakGroup struct {
+	ID       string
+	ParentID string
+	Roles    []string
+	Members  []string
+}
+
 type fakeKeycloak struct {
 	realm    string
 	clients  []keycloakClientRep
 	roles    []clientRole
+	users    []keycloakUser
+	groups   []keycloakGroup
 	pageSize int
 
 	mu       sync.Mutex
@@ -67,6 +84,18 @@ func newFakeKeycloak(t *testing.T, roles []clientRole) *fakeKeycloak {
 
 func (f *fakeKeycloak) URL() string { return f.server.URL }
 
+func (f *fakeKeycloak) seedUsers(users ...keycloakUser) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users = append(f.users, users...)
+}
+
+func (f *fakeKeycloak) seedGroups(groups ...keycloakGroup) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.groups = append(f.groups, groups...)
+}
+
 func (f *fakeKeycloak) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -83,6 +112,10 @@ func (f *fakeKeycloak) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleToken(w, recorded)
 	case r.URL.Path == "/admin/realms/"+f.realm+"/clients":
 		f.handleClients(w, r, recorded)
+	case r.URL.Path == "/admin/realms/"+f.realm+"/users":
+		f.handleUsers(w, r, recorded)
+	case strings.HasPrefix(r.URL.Path, "/admin/realms/"+f.realm+"/users/") && strings.HasSuffix(r.URL.Path, "/composite"):
+		f.handleCompositeRoles(w, r, recorded)
 	case strings.HasPrefix(r.URL.Path, "/admin/realms/"+f.realm+"/clients/") && strings.HasSuffix(r.URL.Path, "/roles"):
 		f.handleRoles(w, r, recorded)
 	default:
@@ -144,6 +177,103 @@ func (f *fakeKeycloak) handleRoles(w http.ResponseWriter, r *http.Request, recor
 	writeJSON(w, roles)
 }
 
+func (f *fakeKeycloak) handleUsers(w http.ResponseWriter, r *http.Request, recorded recordedRequest) {
+	if !f.authorized(w, recorded) {
+		return
+	}
+	first := queryInt(r, "first", 0)
+	page := f.users[min(first, len(f.users)):]
+	if f.pageSize > 0 && len(page) > f.pageSize {
+		page = page[:f.pageSize]
+	}
+	users := []map[string]any{}
+	for _, user := range page {
+		users = append(users, map[string]any{
+			"id":       user.ID,
+			"username": user.Username,
+			"email":    user.Email,
+			"enabled":  user.Enabled,
+		})
+	}
+	writeJSON(w, users)
+}
+
+func (f *fakeKeycloak) handleCompositeRoles(w http.ResponseWriter, r *http.Request, recorded recordedRequest) {
+	if !f.authorized(w, recorded) {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/admin/realms/"+f.realm+"/users/")
+	userID, rest, found := strings.Cut(path, "/")
+	if !found || rest != "role-mappings/clients/"+testRolesUUID+"/composite" {
+		http.NotFound(w, r)
+		return
+	}
+	user, found := f.userByID(userID)
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+
+	roles := []map[string]string{}
+	for _, role := range f.roles {
+		if f.userHasRole(user, role.Name) {
+			roles = append(roles, map[string]string{"id": role.ID, "name": role.Name})
+		}
+	}
+	writeJSON(w, roles)
+}
+
+func (f *fakeKeycloak) userHasRole(user keycloakUser, roleName string) bool {
+	for _, direct := range user.DirectRoles {
+		if direct == roleName {
+			return true
+		}
+	}
+	for _, group := range f.groups {
+		if !contains(group.Members, user.ID) {
+			continue
+		}
+		for id := group.ID; id != ""; {
+			current, found := f.groupByID(id)
+			if !found {
+				break
+			}
+			if contains(current.Roles, roleName) {
+				return true
+			}
+			id = current.ParentID
+		}
+	}
+	return false
+}
+
+func (f *fakeKeycloak) userByID(id string) (keycloakUser, bool) {
+	for _, user := range f.users {
+		if user.ID == id {
+			return user, true
+		}
+	}
+	return keycloakUser{}, false
+}
+
+func (f *fakeKeycloak) groupByID(id string) (keycloakGroup, bool) {
+	for _, group := range f.groups {
+		if group.ID == id {
+			return group, true
+		}
+	}
+	return keycloakGroup{}, false
+}
+
+func contains(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
+}
+
 func (f *fakeKeycloak) authorized(w http.ResponseWriter, recorded recordedRequest) bool {
 	if recorded.Authorization != "Bearer "+testAccessToken {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -165,6 +295,11 @@ type outlineGroup struct {
 	ExternalID string
 }
 
+type outlineUser struct {
+	ID    string
+	Email string
+}
+
 type fakeOutline struct {
 	pageSize        int
 	listGroupsDelay time.Duration
@@ -172,6 +307,8 @@ type fakeOutline struct {
 
 	mu          sync.Mutex
 	groups      []outlineGroup
+	users       []outlineUser
+	memberships map[string][]string
 	counter     int
 	requests    []recordedRequest
 	inFlight    int
@@ -181,7 +318,7 @@ type fakeOutline struct {
 
 func newFakeOutline(t *testing.T) *fakeOutline {
 	t.Helper()
-	f := &fakeOutline{}
+	f := &fakeOutline{memberships: map[string][]string{}}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
@@ -193,6 +330,12 @@ func (f *fakeOutline) seedGroups(groups ...outlineGroup) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.groups = append(f.groups, groups...)
+}
+
+func (f *fakeOutline) seedUsers(users ...outlineUser) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.users = append(f.users, users...)
 }
 
 func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +362,12 @@ func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleCreateGroup(w, recorded)
 	case "/api/groups.update":
 		f.handleUpdateGroup(w, recorded)
+	case "/api/groups.memberships":
+		f.handleGroupMemberships(w, recorded)
+	case "/api/groups.add_user":
+		f.handleAddUser(w, recorded)
+	case "/api/users.list":
+		f.handleListUsers(w, recorded)
 	default:
 		http.NotFound(w, r)
 	}
@@ -321,6 +470,146 @@ func (f *fakeOutline) handleUpdateGroup(w http.ResponseWriter, recorded recorded
 	writeJSON(w, map[string]any{"ok": false, "error": "group not found"})
 }
 
+func (f *fakeOutline) handleGroupMemberships(w http.ResponseWriter, recorded recordedRequest) {
+	id, _ := recorded.JSON["id"].(string)
+	limit, offset := listWindow(recorded, f.pageSize)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	members := append([]string(nil), f.memberships[id]...)
+
+	if offset > len(members) {
+		offset = len(members)
+	}
+	end := min(offset+limit, len(members))
+	groupMemberships := []map[string]any{}
+	pageUsers := []map[string]any{}
+	for _, userID := range members[offset:end] {
+		groupMemberships = append(groupMemberships, map[string]any{
+			"id":         userID + "-" + id,
+			"userId":     userID,
+			"groupId":    id,
+			"permission": "read",
+		})
+		if user, found := f.userRecord(userID); found {
+			pageUsers = append(pageUsers, presentUser(user))
+		}
+	}
+	writeJSON(w, map[string]any{
+		"ok": true,
+		"data": map[string]any{
+			"groupMemberships": groupMemberships,
+			"users":            pageUsers,
+		},
+		"pagination": map[string]int{
+			"limit":  limit,
+			"offset": offset,
+			"total":  len(members),
+		},
+	})
+}
+
+func (f *fakeOutline) handleAddUser(w http.ResponseWriter, recorded recordedRequest) {
+	groupID, _ := recorded.JSON["id"].(string)
+	userID, _ := recorded.JSON["userId"].(string)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	group, found := f.groupRecordByID(groupID)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"ok": false, "error": "group not found"})
+		return
+	}
+	user, found := f.userRecord(userID)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"ok": false, "error": "user not found"})
+		return
+	}
+	if !contains(f.memberships[groupID], userID) {
+		f.memberships[groupID] = append(f.memberships[groupID], userID)
+	}
+	writeJSON(w, map[string]any{
+		"ok": true,
+		"data": map[string]any{
+			"users": []map[string]any{presentUser(user)},
+			"groupMemberships": []map[string]any{{
+				"id":         userID + "-" + groupID,
+				"userId":     userID,
+				"groupId":    groupID,
+				"permission": "read",
+			}},
+			"groups": []map[string]any{presentGroup(group)},
+		},
+	})
+}
+
+func (f *fakeOutline) handleListUsers(w http.ResponseWriter, recorded recordedRequest) {
+	wanted := map[string]bool{}
+	if emails, ok := recorded.JSON["emails"].([]any); ok {
+		for _, email := range emails {
+			if value, ok := email.(string); ok {
+				wanted[value] = true
+			}
+		}
+	}
+	limit, offset := listWindow(recorded, f.pageSize)
+
+	f.mu.Lock()
+	matched := []outlineUser{}
+	for _, user := range f.users {
+		if wanted[user.Email] {
+			matched = append(matched, user)
+		}
+	}
+	f.mu.Unlock()
+
+	if offset > len(matched) {
+		offset = len(matched)
+	}
+	end := min(offset+limit, len(matched))
+	users := []map[string]any{}
+	for _, user := range matched[offset:end] {
+		users = append(users, presentUser(user))
+	}
+	writeJSON(w, map[string]any{
+		"ok":         true,
+		"data":       users,
+		"pagination": map[string]int{"limit": limit, "offset": offset, "total": len(matched)},
+	})
+}
+
+func (f *fakeOutline) groupRecordByID(id string) (outlineGroup, bool) {
+	for _, group := range f.groups {
+		if group.ID == id {
+			return group, true
+		}
+	}
+	return outlineGroup{}, false
+}
+
+func (f *fakeOutline) userRecord(id string) (outlineUser, bool) {
+	for _, user := range f.users {
+		if user.ID == id {
+			return user, true
+		}
+	}
+	return outlineUser{}, false
+}
+
+func listWindow(recorded recordedRequest, cap int) (limit, offset int) {
+	limit = intValue(recorded.JSON["limit"], 15)
+	offset = intValue(recorded.JSON["offset"], 0)
+	if limit <= 0 {
+		limit = 15
+	}
+	if cap > 0 && limit > cap {
+		limit = cap
+	}
+	return limit, offset
+}
+
 func (f *fakeOutline) snapshot() []outlineGroup {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -357,12 +646,19 @@ func (f *fakeOutline) listCalls() int {
 	return calls
 }
 
+func (f *fakeOutline) groupMembers(groupID string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.memberships[groupID]...)
+}
+
 func (f *fakeOutline) writeRequests() []recordedRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var writes []recordedRequest
 	for _, request := range f.requests {
-		if request.Path != "/api/groups.list" {
+		switch request.Path {
+		case "/api/groups.create", "/api/groups.update", "/api/groups.add_user":
 			writes = append(writes, request)
 		}
 	}
@@ -375,6 +671,14 @@ func presentGroup(group outlineGroup) map[string]any {
 		"name":        group.Name,
 		"externalId":  group.ExternalID,
 		"memberCount": 0,
+	}
+}
+
+func presentUser(user outlineUser) map[string]any {
+	return map[string]any{
+		"id":    user.ID,
+		"name":  user.ID,
+		"email": user.Email,
 	}
 }
 

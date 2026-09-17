@@ -8,13 +8,15 @@ import (
 type groupActionKind int
 
 const (
-	groupActionCreate groupActionKind = iota
+	groupActionKeep groupActionKind = iota
+	groupActionCreate
 	groupActionAdopt
 	groupActionRename
 )
 
 type groupAction struct {
 	kind       groupActionKind
+	roleID     string
 	groupID    string
 	name       string
 	externalID string
@@ -30,20 +32,24 @@ func planGroupActions(roles []clientRole, groups []outlineGroup, externalIDPrefi
 		externalID := externalIDPrefix + role.ID
 
 		if existing, found := findGroupByExternalID(groups, externalID); found {
+			kind := groupActionKeep
 			if existing.Name != role.Name {
-				actions = append(actions, groupAction{
-					kind:       groupActionRename,
-					groupID:    existing.ID,
-					name:       role.Name,
-					externalID: externalID,
-				})
+				kind = groupActionRename
 			}
+			actions = append(actions, groupAction{
+				kind:       kind,
+				roleID:     role.ID,
+				groupID:    existing.ID,
+				name:       role.Name,
+				externalID: externalID,
+			})
 			continue
 		}
 
 		if existing, found := findAdoptableGroupByName(groups, role.Name); found {
 			actions = append(actions, groupAction{
 				kind:       groupActionAdopt,
+				roleID:     role.ID,
 				groupID:    existing.ID,
 				name:       role.Name,
 				externalID: externalID,
@@ -53,6 +59,7 @@ func planGroupActions(roles []clientRole, groups []outlineGroup, externalIDPrefi
 
 		actions = append(actions, groupAction{
 			kind:       groupActionCreate,
+			roleID:     role.ID,
 			name:       role.Name,
 			externalID: externalID,
 		})

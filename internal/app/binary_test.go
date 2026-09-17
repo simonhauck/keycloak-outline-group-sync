@@ -148,3 +148,42 @@ func TestServiceBinaryOnceExitsNonZeroOnFailedRun(t *testing.T) {
 		t.Fatalf("service did not exit non-zero: %v", err)
 	}
 }
+
+func envWith(env []string, pair string) []string {
+	key, _, _ := strings.Cut(pair, "=")
+	out := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, key+"=") {
+			out = append(out, entry)
+		}
+	}
+	return append(out, pair)
+}
+
+func TestServiceBinaryWarnsAboutSkippedUser(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-eve-one", Username: "eve-one", Email: "eve@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-eve-two", Username: "eve-two", Email: "eve@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-eve", Email: "eve@example.com"})
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=warn")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("service exited with error: %v\n%s", err, output)
+	}
+
+	if !strings.Contains(string(output), "skipping Keycloak user") || !strings.Contains(string(output), "duplicate email") {
+		t.Fatalf("output does not warn about the skipped user:\n%s", output)
+	}
+	assertMembers(t, ol, "created-group-1", nil)
+}

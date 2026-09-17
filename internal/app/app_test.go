@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -375,13 +376,11 @@ func TestRunContinuesAfterFailedSyncRun(t *testing.T) {
 	syncEnv(t, kc, ol)
 	t.Setenv("SYNC_INTERVAL", "10ms")
 
-	runServiceUntil(t, app.Run, ol.listCalls, 2)
-
-	assertGroups(t, ol, []outlineGroup{{
-		ID:         "created-group-1",
-		Name:       "Team A",
-		ExternalID: "keycloak:test:roles-client:role-uuid",
-	}})
+	runServiceUntil(t, app.Run, func() int { return len(ol.snapshot()) }, 1)
+	assertMembers(t, ol, "created-group-1", nil)
+	if calls := ol.listCalls(); calls < 2 {
+		t.Fatalf("expected a retry after the failed Sync Run, got %d Outline group listing(s)", calls)
+	}
 }
 
 func TestRunDoesNotOverlapSyncRuns(t *testing.T) {
@@ -405,4 +404,241 @@ func TestRunPerformsSyncRunAtStartup(t *testing.T) {
 	t.Setenv("SYNC_INTERVAL", "1h")
 
 	runServiceUntil(t, app.Run, ol.listCalls, 1)
+}
+
+func assertMembers(t *testing.T, ol *fakeOutline, groupID string, want []string) {
+	t.Helper()
+	got := ol.groupMembers(groupID)
+	slices.Sort(got)
+	want = append([]string(nil), want...)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("members of Outline Group %s:\n got: %v\nwant: %v", groupID, got, want)
+	}
+}
+
+func TestRunOnceAddsUserWithDirectClientRole(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID:          "kc-alice",
+		Username:    "alice",
+		Email:       "alice@example.com",
+		Enabled:     true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", []string{"outline-alice"})
+}
+
+func TestRunOnceAddsUserInheritingClientRoleThroughKeycloakGroups(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedGroups(
+		keycloakGroup{ID: "parent-group", Roles: []string{"Team A"}},
+		keycloakGroup{ID: "child-group", ParentID: "parent-group", Members: []string{"kc-bob"}},
+	)
+	kc.seedUsers(keycloakUser{ID: "kc-bob", Username: "bob", Email: "bob@example.com", Enabled: true})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-bob", Email: "bob@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", []string{"outline-bob"})
+}
+
+func TestRunOnceSkipsDisabledUsers(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-carol", Email: "carol@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", nil)
+	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.create" {
+		t.Fatalf("expected only the group create write, got: %+v", writes)
+	}
+}
+
+func TestRunOnceSkipsUsersWithoutEmail(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-dave", Username: "dave", Email: "", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", nil)
+	for _, request := range ol.allRequests() {
+		if request.Path != "/api/users.list" {
+			continue
+		}
+		for _, email := range request.JSON["emails"].([]any) {
+			if email == "" {
+				t.Fatalf("users.list was queried with an empty email: %+v", request.JSON)
+			}
+		}
+	}
+}
+
+func TestRunOnceSkipsUsersSharingAnEmailAddress(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-eve-one", Username: "eve-one", Email: "eve@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-eve-two", Username: "eve-two", Email: "EVE@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-eve", Email: "eve@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", nil)
+	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.create" {
+		t.Fatalf("expected only the group create write, got: %+v", writes)
+	}
+}
+
+func TestRunOnceSkipsUsersWithoutOutlineAccount(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-frank", Username: "frank", Email: "frank@example.com", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", nil)
+	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.create" {
+		t.Fatalf("expected only the group create write, got: %+v", writes)
+	}
+	for _, request := range ol.allRequests() {
+		if strings.Contains(request.Path, "invite") || strings.Contains(request.Path, "users.create") {
+			t.Fatalf("the service must not create accounts, saw request: %+v", request)
+		}
+	}
+}
+
+func TestRunOnceMatchesOutlineAccountEmailCaseInsensitively(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-grace", Username: "grace", Email: "Grace@Example.COM", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-grace", Email: "grace@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", []string{"outline-grace"})
+}
+
+func TestRunOncePaginatesUsersAccountsAndMemberships(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	var users []keycloakUser
+	var accounts []outlineUser
+	var want []string
+	for i := 1; i <= 5; i++ {
+		username := fmt.Sprintf("user-%d", i)
+		email := username + "@example.com"
+		users = append(users, keycloakUser{
+			ID: "kc-" + username, Username: username, Email: email, Enabled: true,
+			DirectRoles: []string{"Team A"},
+		})
+		accounts = append(accounts, outlineUser{ID: "outline-" + username, Email: email})
+		want = append(want, "outline-"+username)
+	}
+	kc.seedUsers(users...)
+	kc.pageSize = 2
+	ol := newFakeOutline(t)
+	ol.pageSize = 2
+	ol.seedUsers(accounts...)
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "created-group-1", want)
+}
+
+func TestRunOnceTwiceKeepsMembershipWithoutAdditionalWrites(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	assertMembers(t, ol, "created-group-1", []string{"outline-alice"})
+	writesAfterFirst := len(ol.writeRequests())
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if writesAfterSecond := len(ol.writeRequests()); writesAfterSecond != writesAfterFirst {
+		t.Fatalf("second Sync Run performed %d extra write(s); members are already in sync",
+			writesAfterSecond-writesAfterFirst)
+	}
+	assertMembers(t, ol, "created-group-1", []string{"outline-alice"})
+}
+
+func TestRunOnceCreatesManagedGroupWithNoRoleHolders(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertGroups(t, ol, []outlineGroup{{
+		ID:         "created-group-1",
+		Name:       "Team A",
+		ExternalID: "keycloak:test:roles-client:role-uuid",
+	}})
+	assertMembers(t, ol, "created-group-1", nil)
+	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.create" {
+		t.Fatalf("expected only the group create write, got: %+v", writes)
+	}
 }

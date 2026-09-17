@@ -25,6 +25,13 @@ type clientRole struct {
 	Name string `json:"name"`
 }
 
+type clientUser struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Enabled  bool   `json:"enabled"`
+}
+
 func newKeycloakAdmin(baseURL, realm string) *keycloakAdmin {
 	return &keycloakAdmin{
 		baseURL: strings.TrimRight(baseURL, "/"),
@@ -109,6 +116,49 @@ func (c *keycloakAdmin) clientRoles(ctx context.Context, clientUUID string) ([]c
 		}
 		first += len(page)
 	}
+}
+
+func (c *keycloakAdmin) users(ctx context.Context) ([]clientUser, error) {
+	var users []clientUser
+	for first := 0; ; {
+		endpoint := fmt.Sprintf("%s/admin/realms/%s/users?first=%d&max=%d",
+			c.baseURL, url.PathEscape(c.realm), first, keycloakPageSize)
+		body, status, err := c.do(ctx, http.MethodGet, endpoint, nil, "")
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("user listing returned status %d: %s", status, strings.TrimSpace(string(body)))
+		}
+
+		var page []clientUser
+		if err := json.Unmarshal(body, &page); err != nil {
+			return nil, fmt.Errorf("decoding user listing response: %w", err)
+		}
+		users = append(users, page...)
+		if len(page) == 0 {
+			return users, nil
+		}
+		first += len(page)
+	}
+}
+
+func (c *keycloakAdmin) effectiveClientRoles(ctx context.Context, userID, clientUUID string) ([]clientRole, error) {
+	endpoint := fmt.Sprintf("%s/admin/realms/%s/users/%s/role-mappings/clients/%s/composite",
+		c.baseURL, url.PathEscape(c.realm), url.PathEscape(userID), url.PathEscape(clientUUID))
+	body, status, err := c.do(ctx, http.MethodGet, endpoint, nil, "")
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("role mapping lookup returned status %d: %s", status, strings.TrimSpace(string(body)))
+	}
+
+	var roles []clientRole
+	if err := json.Unmarshal(body, &roles); err != nil {
+		return nil, fmt.Errorf("decoding role mapping response: %w", err)
+	}
+	return roles, nil
 }
 
 func (c *keycloakAdmin) do(ctx context.Context, method, endpoint string, body io.Reader, contentType string) ([]byte, int, error) {
