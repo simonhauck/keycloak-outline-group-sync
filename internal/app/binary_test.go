@@ -187,3 +187,58 @@ func TestServiceBinaryWarnsAboutSkippedUser(t *testing.T) {
 	}
 	assertMembers(t, ol, "created-group-1", nil)
 }
+
+func TestServiceBinaryReportsRunSummary(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid"},
+		outlineGroup{ID: "orphaned-group", Name: "Old Team", ExternalID: "keycloak:test:roles-client:deleted-role-uuid"},
+	)
+	ol.seedUsers(outlineUser{ID: "outline-bob", Email: "bob@example.com"})
+	ol.seedMembership("managed-group", "outline-bob")
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("service exited with error: %v\n%s", err, output)
+	}
+
+	for _, want := range []string{
+		`"membersRemoved":1`,
+		`"skippedUsers":1`,
+		`"orphanedGroups":1`,
+		`"failures":0`,
+		"orphaned Managed Group",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("run summary does not report %s:\n%s", want, output)
+		}
+	}
+}
+
+func TestServiceBinaryReportsFailedOperation(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.failNextAddUser(1)
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit when an operation fails\n%s", output)
+	}
+	if !strings.Contains(string(output), `"failures":1`) {
+		t.Fatalf("run summary does not report the failure:\n%s", output)
+	}
+}

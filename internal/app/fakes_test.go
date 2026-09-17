@@ -59,12 +59,14 @@ type keycloakGroup struct {
 }
 
 type fakeKeycloak struct {
-	realm    string
-	clients  []keycloakClientRep
-	roles    []clientRole
-	users    []keycloakUser
-	groups   []keycloakGroup
-	pageSize int
+	realm         string
+	clients       []keycloakClientRep
+	roles         []clientRole
+	users         []keycloakUser
+	groups        []keycloakGroup
+	pageSize      int
+	failUsers     int
+	failComposite int
 
 	mu       sync.Mutex
 	requests []recordedRequest
@@ -95,6 +97,18 @@ func (f *fakeKeycloak) seedGroups(groups ...keycloakGroup) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.groups = append(f.groups, groups...)
+}
+
+func (f *fakeKeycloak) failNextUserListings(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failUsers = count
+}
+
+func (f *fakeKeycloak) failNextRoleMappingListings(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failComposite = count
 }
 
 func (f *fakeKeycloak) handle(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +196,12 @@ func (f *fakeKeycloak) handleUsers(w http.ResponseWriter, r *http.Request, recor
 	if !f.authorized(w, recorded) {
 		return
 	}
+	if f.failUsers > 0 {
+		f.failUsers--
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "Internal Server Error"})
+		return
+	}
 	first := queryInt(r, "first", 0)
 	page := f.users[min(first, len(f.users)):]
 	if f.pageSize > 0 && len(page) > f.pageSize {
@@ -201,6 +221,12 @@ func (f *fakeKeycloak) handleUsers(w http.ResponseWriter, r *http.Request, recor
 
 func (f *fakeKeycloak) handleCompositeRoles(w http.ResponseWriter, r *http.Request, recorded recordedRequest) {
 	if !f.authorized(w, recorded) {
+		return
+	}
+	if f.failComposite > 0 {
+		f.failComposite--
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "Internal Server Error"})
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/admin/realms/"+f.realm+"/users/")
@@ -296,6 +322,7 @@ type fakeOutline struct {
 	pageSize        int
 	listGroupsDelay time.Duration
 	failListGroups  int
+	failAddUser     int
 
 	mu          sync.Mutex
 	groups      []outlineGroup
@@ -330,6 +357,18 @@ func (f *fakeOutline) seedUsers(users ...outlineUser) {
 	f.users = append(f.users, users...)
 }
 
+func (f *fakeOutline) seedMembership(groupID string, userIDs ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.memberships[groupID] = append(f.memberships[groupID], userIDs...)
+}
+
+func (f *fakeOutline) failNextAddUser(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failAddUser = count
+}
+
 func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
 	recorded, err := recordRequest(r)
 	if err != nil {
@@ -358,6 +397,8 @@ func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleGroupMemberships(w, recorded)
 	case "/api/groups.add_user":
 		f.handleAddUser(w, recorded)
+	case "/api/groups.remove_user":
+		f.handleRemoveUser(w, recorded)
 	case "/api/users.list":
 		f.handleListUsers(w, recorded)
 	default:
@@ -507,6 +548,12 @@ func (f *fakeOutline) handleAddUser(w http.ResponseWriter, recorded recordedRequ
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failAddUser > 0 {
+		f.failAddUser--
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"ok": false, "error": "Internal Server Error"})
+		return
+	}
 	group, found := f.groupRecordByID(groupID)
 	if !found {
 		w.WriteHeader(http.StatusNotFound)
@@ -534,6 +581,36 @@ func (f *fakeOutline) handleAddUser(w http.ResponseWriter, recorded recordedRequ
 			}},
 			"groups": []map[string]any{presentGroup(group)},
 		},
+	})
+}
+
+func (f *fakeOutline) handleRemoveUser(w http.ResponseWriter, recorded recordedRequest) {
+	groupID, _ := recorded.JSON["id"].(string)
+	userID, _ := recorded.JSON["userId"].(string)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	group, found := f.groupRecordByID(groupID)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"ok": false, "error": "group not found"})
+		return
+	}
+	if _, found := f.userRecord(userID); !found {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"ok": false, "error": "user not found"})
+		return
+	}
+	members := f.memberships[groupID]
+	for i, memberID := range members {
+		if memberID == userID {
+			f.memberships[groupID] = append(members[:i], members[i+1:]...)
+			break
+		}
+	}
+	writeJSON(w, map[string]any{
+		"ok":   true,
+		"data": map[string]any{"groups": []map[string]any{presentGroup(group)}},
 	})
 }
 
@@ -650,7 +727,7 @@ func (f *fakeOutline) writeRequests() []recordedRequest {
 	var writes []recordedRequest
 	for _, request := range f.requests {
 		switch request.Path {
-		case "/api/groups.create", "/api/groups.update", "/api/groups.add_user":
+		case "/api/groups.create", "/api/groups.update", "/api/groups.add_user", "/api/groups.remove_user":
 			writes = append(writes, request)
 		}
 	}

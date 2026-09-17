@@ -642,3 +642,201 @@ func TestRunOnceCreatesManagedGroupWithNoRoleHolders(t *testing.T) {
 		t.Fatalf("expected only the group create write, got: %+v", writes)
 	}
 }
+
+func TestRunOnceRemovesMemberWhoLostClientRole(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("managed-group", "outline-alice")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "managed-group", nil)
+	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.remove_user" {
+		t.Fatalf("expected only one remove_user write, got: %+v", writes)
+	}
+}
+
+func TestRunOnceRemovesDisabledUserFromManagedGroup(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-carol", Email: "carol@example.com"})
+	ol.seedMembership("managed-group", "outline-carol")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "managed-group", nil)
+}
+
+func TestRunOnceRemovesExtraMembersOnlyFromManagedGroups(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid"},
+		outlineGroup{ID: "unmanaged-group", Name: "Handbook"},
+	)
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+	)
+	ol.seedMembership("managed-group", "outline-alice")
+	ol.seedMembership("unmanaged-group", "outline-bob")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "managed-group", nil)
+	assertMembers(t, ol, "unmanaged-group", []string{"outline-bob"})
+	for _, write := range ol.writeRequests() {
+		if write.JSON["id"] == "unmanaged-group" {
+			t.Fatalf("the service wrote to an unmanaged Outline Group: %+v", write)
+		}
+	}
+}
+
+func TestRunOnceLeavesOrphanedManagedGroupsUntouched(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "orphaned-group", Name: "Old Team", ExternalID: "keycloak:test:roles-client:deleted-role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("orphaned-group", "outline-alice")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "orphaned-group", []string{"outline-alice"})
+	for _, write := range ol.writeRequests() {
+		if write.JSON["id"] == "orphaned-group" {
+			t.Fatalf("the service wrote to an Orphaned Managed Group: %+v", write)
+		}
+	}
+}
+
+func TestRunOnceWritesNothingWhenKeycloakReadFails(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.failNextUserListings(1)
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("managed-group", "outline-alice")
+	syncEnv(t, kc, ol)
+
+	err := app.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the Sync Run to fail when Keycloak is unavailable")
+	}
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("a failed Keycloak read must abort before any Outline write, got: %+v", writes)
+	}
+	if requests := ol.allRequests(); len(requests) != 0 {
+		t.Fatalf("a failed Keycloak read must abort before touching Outline, got: %+v", requests)
+	}
+}
+
+func TestRunOnceAppliesOtherOperationsWhenOneFails(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-a-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-bob", Username: "bob", Email: "bob@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+	)
+	ol.failNextAddUser(1)
+	syncEnv(t, kc, ol)
+
+	err := app.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the Sync Run to report the failed operation")
+	}
+
+	assertMembers(t, ol, "created-group-1", nil)
+	assertMembers(t, ol, "created-group-2", []string{"outline-bob"})
+}
+
+func TestRunOnceTwiceRemovesMemberOnlyOnce(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("managed-group", "outline-alice")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	assertMembers(t, ol, "managed-group", nil)
+	writesAfterFirst := len(ol.writeRequests())
+	if writesAfterFirst == 0 {
+		t.Fatal("first Sync Run should have removed the extra member")
+	}
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	if writesAfterSecond := len(ol.writeRequests()); writesAfterSecond != writesAfterFirst {
+		t.Fatalf("second Sync Run performed %d extra write(s); membership is already in sync",
+			writesAfterSecond-writesAfterFirst)
+	}
+}
+
+func TestRunOnceWritesNothingWhenRoleMappingReadFails(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	kc.failNextRoleMappingListings(1)
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("managed-group", "outline-alice")
+	syncEnv(t, kc, ol)
+
+	err := app.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the Sync Run to fail when Keycloak role mappings are unavailable")
+	}
+	if requests := ol.allRequests(); len(requests) != 0 {
+		t.Fatalf("a failed Keycloak read must abort before touching Outline, got: %+v", requests)
+	}
+}
