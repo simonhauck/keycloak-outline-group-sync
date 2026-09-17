@@ -14,7 +14,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -44,6 +46,9 @@ var httpClient = &http.Client{
 
 func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("docker is required in CI: %v", err)
+		}
 		t.Skip("docker is not installed")
 	}
 	s := startStack(t)
@@ -66,6 +71,7 @@ func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 		s.assertMembers(t, "team-disabled", "carol@example.com")
 		s.assertMembers(t, "team-duplicate")
 		s.assertMembers(t, "team-noaccount")
+		s.assertMembers(t, "team-excluded")
 		s.assertMembers(t, "handbook", "frank@example.com")
 		if got := s.findGroup(t, "handbook"); got.ExternalID != "" || got.ID != s.handbook {
 			t.Fatalf("unmanaged group handbook was touched: %+v", got)
@@ -111,11 +117,17 @@ func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 
 	t.Run("failed keycloak fetch writes nothing", func(t *testing.T) {
 		before := s.snapshot(t)
-		if output, err := s.runSync(t, map[string]string{"KEYCLOAK_URL": "http://127.0.0.1:9"}); err == nil {
-			t.Fatalf("expected a non-zero exit when Keycloak is unreachable\n%s", output)
-		}
-		if after := s.snapshot(t); before != after {
-			t.Fatalf("a failed Keycloak fetch changed Outline state:\nbefore:\n%s\nafter:\n%s", before, after)
+		for name, env := range map[string]map[string]string{
+			"unreachable":          {"KEYCLOAK_URL": "http://127.0.0.1:9"},
+			"unknown roles client": {"KEYCLOAK_ROLES_CLIENT_ID": "does-not-exist"},
+		} {
+			output, err := s.runSync(t, env)
+			if err == nil {
+				t.Fatalf("expected a non-zero exit for the %s Keycloak fetch\n%s", name, output)
+			}
+			if after := s.snapshot(t); before != after {
+				t.Fatalf("the %s Keycloak fetch changed Outline state:\nbefore:\n%s\nafter:\n%s", name, before, after)
+			}
 		}
 	})
 }
@@ -137,6 +149,9 @@ func startStack(t *testing.T) *stack {
 	if out, err := s.compose("up", "-d", "--wait", "outline"); err != nil {
 		t.Fatalf("starting the compose stack: %v\n%s", err, out)
 	}
+	if out, err := s.compose("build", "sync"); err != nil {
+		t.Fatalf("building the service image: %v\n%s", err, out)
+	}
 	s.apiKey = s.bootstrapOutline(t)
 	s.kcToken = s.keycloakToken(t)
 	s.seedOutline(t)
@@ -150,15 +165,6 @@ func (s *stack) compose(args ...string) (string, error) {
 	command.Stderr = &output
 	err := command.Run()
 	return output.String(), err
-}
-
-func (s *stack) mustCompose(t *testing.T, args ...string) string {
-	t.Helper()
-	output, err := s.compose(args...)
-	if err != nil {
-		t.Fatalf("docker compose %v: %v\n%s", args, err, output)
-	}
-	return output
 }
 
 func (s *stack) runSync(t *testing.T, env map[string]string) (string, error) {
@@ -254,19 +260,16 @@ func (s *stack) seedOutline(t *testing.T) {
 			{"email": "carol@example.com", "name": "Carol", "role": "member"},
 			{"email": "dave@example.com", "name": "Dave", "role": "member"},
 			{"email": "frank@example.com", "name": "Frank", "role": "member"},
+			{"email": "grace@example.com", "name": "Grace", "role": "member"},
 		},
 		"suppressEmail": true,
 	}, &invited)
 
-	var adopt struct {
-		ID string `json:"id"`
-	}
+	var adopt group
 	s.outline(t, "groups.create", map[string]any{"name": "team-adopt"}, &adopt)
 	s.adoptID = adopt.ID
 
-	var handbook struct {
-		ID string `json:"id"`
-	}
+	var handbook group
 	s.outline(t, "groups.create", map[string]any{"name": "handbook"}, &handbook)
 	s.handbook = handbook.ID
 
@@ -345,13 +348,11 @@ func (s *stack) groups(t *testing.T) []group {
 
 func (s *stack) findGroup(t *testing.T, name string) group {
 	t.Helper()
+	var names []string
 	for _, candidate := range s.groups(t) {
 		if candidate.Name == name {
 			return candidate
 		}
-	}
-	var names []string
-	for _, candidate := range s.groups(t) {
 		names = append(names, candidate.Name)
 	}
 	t.Fatalf("no Outline Group named %q; have %v", name, names)
@@ -386,8 +387,8 @@ func (s *stack) members(t *testing.T, groupID string) []string {
 func (s *stack) assertMembers(t *testing.T, groupName string, want ...string) {
 	t.Helper()
 	got := s.members(t, s.findGroup(t, groupName).ID)
-	sort.Strings(want)
-	if strings.Join(got, ",") != strings.Join(want, ",") {
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
 		t.Fatalf("members of %q:\n got: %v\nwant: %v", groupName, got, want)
 	}
 }

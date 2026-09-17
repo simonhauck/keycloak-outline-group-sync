@@ -31,7 +31,7 @@ $KCADM create clients -r $REALM \
 $KCADM add-roles -r $REALM --uusername service-account-sync-client \
   --cclientid realm-management --rolename view-users --rolename view-clients
 
-for role in team-create team-adopt team-rename team-members team-direct team-disabled team-duplicate team-noaccount; do
+for role in team-create team-adopt team-rename team-members team-direct team-disabled team-duplicate team-noaccount team-excluded; do
   $KCADM create clients/$ROLES_CID/roles -r $REALM -s name=$role
 done
 
@@ -47,12 +47,14 @@ CAROL_ID=$(create_user carol carol@example.com)
 DAVE_ONE_ID=$(create_user dave-one dave@example.com)
 DAVE_TWO_ID=$(create_user dave-two dave@example.com)
 ERIN_ID=$(create_user erin erin@example.com)
+GRACE_ID=$(create_user grace grace@example.com false)
 create_user frank frank@example.com >/dev/null
 
 $KCADM add-roles -r $REALM --uid $BOB_ID --cclientid $ROLES_CLIENT --rolename team-direct
 $KCADM add-roles -r $REALM --uid $DAVE_ONE_ID --cclientid $ROLES_CLIENT --rolename team-duplicate
 $KCADM add-roles -r $REALM --uid $DAVE_TWO_ID --cclientid $ROLES_CLIENT --rolename team-duplicate
 $KCADM add-roles -r $REALM --uid $ERIN_ID --cclientid $ROLES_CLIENT --rolename team-noaccount
+$KCADM add-roles -r $REALM --uid $GRACE_ID --cclientid $ROLES_CLIENT --rolename team-excluded
 
 MEMBERS_GID=$($KCADM create groups -r $REALM -s name=g-members -i)
 $KCADM add-roles -r $REALM --gid $MEMBERS_GID --cclientid $ROLES_CLIENT --rolename team-members

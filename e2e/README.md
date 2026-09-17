@@ -23,11 +23,12 @@ The suite asserts, against real HTTP APIs:
 - a Client Role becomes a Managed Group; a pre-existing group is adopted by name; the group id survives adoption
 - Keycloak Group membership and direct role assignment both add members
 - removing the Keycloak Group membership removes the Outline member; disabling a user removes them
+- a user disabled before the first Sync Run is excluded
 - renaming a Client Role renames its Managed Group without losing its external id
 - duplicate-email users and users without an Outline Account are skipped
 - an unmanaged Outline Group is never touched
 - a second run is a no-op (unchanged state, zeroed run summary)
-- an unreachable Keycloak aborts the run before any Outline write
+- an unreachable Keycloak and an unknown roles client both abort the run before any Outline write
 
 ## Requirements
 
