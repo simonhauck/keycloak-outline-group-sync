@@ -262,3 +262,68 @@ func TestServiceBinaryReportsFailedOperation(t *testing.T) {
 		t.Fatalf("run summary does not report the failure:\n%s", output)
 	}
 }
+
+func TestServiceBinaryDryRunReportsPlanWithoutWrites(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-a-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid",
+	})
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+	)
+	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+
+	dryRun := exec.Command(serviceBinary, "--once")
+	dryRun.Env = envWith(envWith(serviceEnv(kc, ol), "LOG_LEVEL=info"), "DRY_RUN=true")
+	output, err := dryRun.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry run exited with error: %v\n%s", err, output)
+	}
+	for _, want := range []string{
+		"dry run: would rename Managed Group",
+		"dry run: would create Managed Group",
+		"dry run: would add member",
+		"dry run: would remove member",
+		"dry run complete: no writes were made",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("dry run output does not contain %q:\n%s", want, output)
+		}
+	}
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("dry run must not write to Outline, got: %+v", writes)
+	}
+	assertGroups(t, ol, []outlineGroup{{
+		ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid",
+	}})
+	assertMembers(t, ol, "managed-a", []string{"outline-alice", "outline-bob"})
+
+	realRun := exec.Command(serviceBinary, "--once")
+	realRun.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err = realRun.CombinedOutput()
+	if err != nil {
+		t.Fatalf("real run exited with error: %v\n%s", err, output)
+	}
+	assertGroups(t, ol, []outlineGroup{
+		{ID: "managed-a", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		{ID: "created-group-1", Name: "Team B", ExternalID: "keycloak:test:roles-client:role-b-uuid"},
+	})
+	assertMembers(t, ol, "managed-a", []string{"outline-alice"})
+	assertMembers(t, ol, "created-group-1", []string{"outline-dave"})
+}

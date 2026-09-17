@@ -77,6 +77,7 @@ func TestRunOnceFailsFastWhenSettingInvalid(t *testing.T) {
 		{"SYNC_INTERVAL", "not-a-duration"},
 		{"SYNC_INTERVAL", "-1s"},
 		{"SYNC_INTERVAL", "0s"},
+		{"DRY_RUN", "sometimes"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			validEnv(t)
@@ -891,4 +892,113 @@ func TestRunOnceReconcilesMembershipWhenGroupUpdateFails(t *testing.T) {
 	}
 
 	assertMembers(t, ol, "managed-group", []string{"outline-alice"})
+}
+
+func TestRunOnceDryRunWritesNothing(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-a-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+		{ID: "role-c-uuid", Name: "Team C"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+		keycloakUser{
+			ID: "kc-erin", Username: "erin", Email: "erin@example.com", Enabled: true,
+			DirectRoles: []string{"Team C"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		outlineGroup{ID: "adoptable-c", Name: "team c"},
+	)
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+		outlineUser{ID: "outline-erin", Email: "erin@example.com"},
+	)
+	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+	syncEnv(t, kc, ol)
+	t.Setenv("DRY_RUN", "true")
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("dry run must not write to Outline, got: %+v", writes)
+	}
+	assertGroups(t, ol, []outlineGroup{
+		{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		{ID: "adoptable-c", Name: "team c"},
+	})
+	assertMembers(t, ol, "managed-a", []string{"outline-alice", "outline-bob"})
+}
+
+func TestRunOnceDryRunThenRealRunAppliesPlan(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-a-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+		{ID: "role-c-uuid", Name: "Team C"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+		keycloakUser{
+			ID: "kc-erin", Username: "erin", Email: "erin@example.com", Enabled: true,
+			DirectRoles: []string{"Team C"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		outlineGroup{ID: "adoptable-c", Name: "team c"},
+	)
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+		outlineUser{ID: "outline-erin", Email: "erin@example.com"},
+	)
+	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+	syncEnv(t, kc, ol)
+
+	t.Setenv("DRY_RUN", "true")
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("dry RunOnce: %v", err)
+	}
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("dry run must not write to Outline, got: %+v", writes)
+	}
+
+	t.Setenv("DRY_RUN", "false")
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("real RunOnce: %v", err)
+	}
+
+	assertGroups(t, ol, []outlineGroup{
+		{ID: "managed-a", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		{ID: "adoptable-c", Name: "Team C", ExternalID: "keycloak:test:roles-client:role-c-uuid"},
+		{ID: "created-group-1", Name: "Team B", ExternalID: "keycloak:test:roles-client:role-b-uuid"},
+	})
+	assertMembers(t, ol, "managed-a", []string{"outline-alice"})
+	assertMembers(t, ol, "adoptable-c", []string{"outline-erin"})
+	assertMembers(t, ol, "created-group-1", []string{"outline-dave"})
+	if writes := ol.writeRequests(); len(writes) != 6 {
+		t.Fatalf("expected rename, adopt, create, remove and two adds; got %d write(s): %+v", len(writes), writes)
+	}
 }
