@@ -37,6 +37,6 @@ The SSO login is pure HTTP: it starts at Outline's `/auth/oidc`, parses Keycloak
 ## Requirements
 
 - Docker with Compose v2
-- A Linux host: the stack publishes Keycloak on `127.0.0.1:18080` and Outline on `127.0.0.1:13000` for the test client.
+- A Linux host: the stack publishes Keycloak on loopback port `18080` and Outline on loopback port `13000` for the test client.
 
-The SSO login scenarios are covered by #11; this suite seeds Outline accounts through the admin API instead.
+Accounts used by the membership scenarios are seeded through the admin API; the SSO scenarios above exercise the login path that creates accounts in production.

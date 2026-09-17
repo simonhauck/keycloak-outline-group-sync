@@ -13,7 +13,16 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
+
+var outlinePublicURL = func() *url.URL {
+	parsed, err := url.Parse(outlineURL)
+	if err != nil {
+		panic(err)
+	}
+	return parsed
+}()
 
 var loginFormAction = regexp.MustCompile(`(?s)<form[^>]*id="kc-form-login"[^>]*action="([^"]+)"`)
 
@@ -34,7 +43,8 @@ func (s *stack) login(t *testing.T, username, password string) string {
 		t.Fatalf("creating cookie jar: %v", err)
 	}
 	client := &http.Client{
-		Jar: jar,
+		Jar:     jar,
+		Timeout: 30 * time.Second,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 				if address == "keycloak:8080" {
@@ -76,7 +86,7 @@ func (s *stack) login(t *testing.T, username, password string) string {
 		t.Fatalf("reading login response: %v", err)
 	}
 
-	for _, cookie := range jar.Cookies(&url.URL{Scheme: "http", Host: "localhost:13000"}) {
+	for _, cookie := range jar.Cookies(outlinePublicURL) {
 		if cookie.Name == "accessToken" {
 			return cookie.Value
 		}

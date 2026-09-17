@@ -167,7 +167,7 @@ func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 		}
 	})
 
-	t.Run("sso first login jit creates the account and the next run adds it", func(t *testing.T) {
+	t.Run("sso first login jit creates the account and the next Sync Run adds it", func(t *testing.T) {
 		var before []struct {
 			ID string `json:"id"`
 		}
