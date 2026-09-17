@@ -1,0 +1,25 @@
+services:
+  keycloak-outline-group-sync:
+    image: ghcr.io/simonhauck/keycloak-outline-group-sync:latest
+    restart: unless-stopped
+    environment:
+      # Keycloak instance and realm that own the Client Roles.
+      KEYCLOAK_URL: https://keycloak.example.com
+      KEYCLOAK_REALM: my-realm
+      # Confidential client used for the client-credentials grant.
+      # Its service account needs the realm-management roles view-users and view-clients.
+      KEYCLOAK_CLIENT_ID: outline-sync
+      KEYCLOAK_CLIENT_SECRET: change-me
+      # Client whose Client Roles map to Outline Groups. Defaults to KEYCLOAK_CLIENT_ID.
+      KEYCLOAK_ROLES_CLIENT_ID: my-outline-client
+      # Outline instance and an API key created by a team admin.
+      OUTLINE_URL: https://outline.example.com
+      OUTLINE_TOKEN: change-me
+      # Time between Sync Runs (default 5m).
+      SYNC_INTERVAL: 5m
+      # Start with true and review the logged plan before enabling writes.
+      DRY_RUN: "true"
+      # debug, info, warn or error (default info).
+      LOG_LEVEL: info
+    # To run as a one-shot job under an external scheduler instead, uncomment:
+    # command: ["--once"]
