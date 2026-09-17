@@ -333,6 +333,12 @@ func (f *fakeOutline) allRequests() []recordedRequest {
 	return append([]recordedRequest(nil), f.requests...)
 }
 
+func (f *fakeOutline) failNextListGroups(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failListGroups = count
+}
+
 func (f *fakeOutline) maxListInFlight() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()

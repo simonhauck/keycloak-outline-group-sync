@@ -89,7 +89,7 @@ func TestServiceBinaryFailsFastOnMissingConfiguration(t *testing.T) {
 func TestServiceBinaryLogsFailedRunAndStopsOnSigterm(t *testing.T) {
 	kc := newFakeKeycloak(t, nil)
 	ol := newFakeOutline(t)
-	ol.failListGroups = 1
+	ol.failNextListGroups(1)
 
 	command := exec.Command(serviceBinary)
 	command.Env = append(serviceEnv(kc, ol), "SYNC_INTERVAL=10ms")
@@ -128,5 +128,23 @@ func TestServiceBinaryLogsFailedRunAndStopsOnSigterm(t *testing.T) {
 
 	if !strings.Contains(stderr.String(), "sync run failed") {
 		t.Fatalf("stderr does not log the failed Sync Run:\n%s", stderr.String())
+	}
+}
+
+func TestServiceBinaryOnceExitsNonZeroOnFailedRun(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	ol.failNextListGroups(1)
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = serviceEnv(kc, ol)
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit for a failed Sync Run\n%s", output)
+	}
+
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("service did not exit non-zero: %v", err)
 	}
 }

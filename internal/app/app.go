@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -29,7 +30,7 @@ func RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return runSync(ctx, cfg, newLogger(cfg))
+	return runSync(ctx, cfg, newLogger(cfg.logLevel))
 }
 
 // Run runs the Sync Service: a Sync Run at startup, then another on every
@@ -40,13 +41,13 @@ func Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	logger := newLogger(cfg)
+	logger := newLogger(cfg.logLevel)
 
 	ticker := time.NewTicker(cfg.syncInterval)
 	defer ticker.Stop()
 
 	for {
-		if err := runSync(ctx, cfg, logger); err != nil && ctx.Err() == nil {
+		if err := runSync(ctx, cfg, logger); err != nil && (ctx.Err() == nil || !errors.Is(err, context.Canceled)) {
 			logger.Error("sync run failed", "error", err)
 		}
 		select {
@@ -57,8 +58,8 @@ func Run(ctx context.Context) error {
 	}
 }
 
-func newLogger(cfg config) *slog.Logger {
-	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.logLevel}))
+func newLogger(level slog.Level) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
 func loadConfig() (config, error) {

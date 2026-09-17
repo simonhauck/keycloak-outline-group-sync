@@ -241,23 +241,23 @@ func TestRunOnceTwiceWithUnchangedStatePerformsNoWrites(t *testing.T) {
 	syncEnv(t, kc, ol)
 
 	if err := app.RunOnce(context.Background()); err != nil {
-		t.Fatalf("first Run: %v", err)
+		t.Fatalf("first Sync Run: %v", err)
 	}
 	afterFirst := ol.snapshot()
 	writesAfterFirst := len(ol.writeRequests())
 	if writesAfterFirst == 0 {
-		t.Fatal("first Run should have created the Managed Group")
+		t.Fatal("first Sync Run should have created the Managed Group")
 	}
 
 	if err := app.RunOnce(context.Background()); err != nil {
-		t.Fatalf("second Run: %v", err)
+		t.Fatalf("second Sync Run: %v", err)
 	}
 	if writesAfterSecond := len(ol.writeRequests()); writesAfterSecond != writesAfterFirst {
-		t.Fatalf("second Run performed %d write(s), want none beyond the first Run's %d",
+		t.Fatalf("second Sync Run performed %d write(s), want none beyond the first Sync Run's %d",
 			writesAfterSecond-writesAfterFirst, writesAfterFirst)
 	}
 	if afterSecond := ol.snapshot(); !reflect.DeepEqual(afterFirst, afterSecond) {
-		t.Fatalf("second Run changed Outline groups:\nbefore: %+v\n after: %+v", afterFirst, afterSecond)
+		t.Fatalf("second Sync Run changed Outline groups:\nbefore: %+v\n after: %+v", afterFirst, afterSecond)
 	}
 }
 
@@ -371,7 +371,7 @@ func TestRunPerformsSyncRunsOnInterval(t *testing.T) {
 func TestRunContinuesAfterFailedSyncRun(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
-	ol.failListGroups = 1
+	ol.failNextListGroups(1)
 	syncEnv(t, kc, ol)
 	t.Setenv("SYNC_INTERVAL", "10ms")
 
@@ -396,4 +396,13 @@ func TestRunDoesNotOverlapSyncRuns(t *testing.T) {
 	if got := ol.maxListInFlight(); got != 1 {
 		t.Fatalf("max concurrent groups.list calls = %d, want 1 (Sync Runs must not overlap)", got)
 	}
+}
+
+func TestRunPerformsSyncRunAtStartup(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+	t.Setenv("SYNC_INTERVAL", "1h")
+
+	runServiceUntil(t, app.Run, ol.listCalls, 1)
 }
