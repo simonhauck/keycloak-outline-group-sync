@@ -73,6 +73,11 @@ services:
       OIDC_USERNAME_CLAIM: preferred_username
       OIDC_SCOPES: openid profile email
       OIDC_DISABLE_REDIRECT: "true"
+      # A first Sync Run creates one Managed Group per Client Role and the
+      # fixtures create groups too, which exceeds Outline's default
+      # groups.create limit of 10/min per credential. Scaling the route limits
+      # keeps the suite focused on sync behaviour; rate-limit resilience is #7.
+      RATE_LIMITER_MULTIPLIER: "10"
     ports:
       - "127.0.0.1:13000:3000"
     healthcheck:
