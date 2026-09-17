@@ -1,0 +1,3 @@
+# The Sync Service reconciles membership only, never accounts
+
+The service matches Role Holders to existing Outline Accounts by email and only adds or removes Outline Group membership; it never creates, invites, suspends, or deletes accounts. Accounts come from first SSO login (JIT provisioning). Auto-inviting was rejected after finding that Outline rejects OIDC logins whose `email_verified` claim is not true while a shell account exists, and because pre-provisioning accounts for people who never log in creates noise and unclaimable accounts. Consequence: a new Keycloak user gains Outline Group access only after their first SSO login plus one Sync Run.
