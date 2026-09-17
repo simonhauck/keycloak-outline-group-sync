@@ -119,6 +119,11 @@ func (o *outlineClient) addUserToGroup(ctx context.Context, groupID, userID stri
 	return err
 }
 
+func (o *outlineClient) removeUserFromGroup(ctx context.Context, groupID, userID string) error {
+	_, err := o.call(ctx, "groups.remove_user", map[string]any{"id": groupID, "userId": userID}, nil)
+	return err
+}
+
 type outlineEnvelope struct {
 	OK    bool            `json:"ok"`
 	Error string          `json:"error"`

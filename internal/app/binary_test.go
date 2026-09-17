@@ -187,3 +187,78 @@ func TestServiceBinaryWarnsAboutSkippedUser(t *testing.T) {
 	}
 	assertMembers(t, ol, "created-group-1", nil)
 }
+
+func TestServiceBinaryReportsRunSummary(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid"},
+		outlineGroup{ID: "orphaned-group", Name: "Old Team", ExternalID: "keycloak:test:roles-client:deleted-role-uuid"},
+	)
+	ol.seedUsers(
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+	)
+	ol.seedMembership("managed-group", "outline-bob")
+	ol.seedMembership("orphaned-group", "outline-bob")
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("service exited with error: %v\n%s", err, output)
+	}
+
+	for _, want := range []string{
+		`"groupsCreated":1`,
+		`"groupsAdopted":0`,
+		`"groupsRenamed":0`,
+		`"membersAdded":1`,
+		`"membersRemoved":1`,
+		`"skippedUsers":1`,
+		`"orphanedGroups":1`,
+		`"failures":0`,
+		"orphaned Managed Group",
+	} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("run summary does not report %s:\n%s", want, output)
+		}
+	}
+	assertMembers(t, ol, "managed-group", nil)
+	assertMembers(t, ol, "created-group-1", []string{"outline-dave"})
+	assertMembers(t, ol, "orphaned-group", []string{"outline-bob"})
+}
+
+func TestServiceBinaryReportsFailedOperation(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+		DirectRoles: []string{"Team A"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.failNextAddUser(1)
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err := command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected a non-zero exit when an operation fails\n%s", output)
+	}
+	if !strings.Contains(string(output), `"failures":1`) {
+		t.Fatalf("run summary does not report the failure:\n%s", output)
+	}
+}

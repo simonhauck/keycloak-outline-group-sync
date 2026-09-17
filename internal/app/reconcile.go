@@ -26,6 +26,30 @@ func managedExternalIDPrefix(cfg config) string {
 	return fmt.Sprintf("keycloak:%s:%s:", cfg.keycloakRealm, cfg.rolesClientID)
 }
 
+func managedRoleID(externalID, externalIDPrefix string) (string, bool) {
+	if !strings.HasPrefix(externalID, externalIDPrefix) {
+		return "", false
+	}
+	return strings.TrimPrefix(externalID, externalIDPrefix), true
+}
+
+func findOrphanedGroups(groups []outlineGroup, roles []clientRole, externalIDPrefix string) []outlineGroup {
+	roleIDs := map[string]bool{}
+	for _, role := range roles {
+		roleIDs[role.ID] = true
+	}
+
+	var orphaned []outlineGroup
+	for _, group := range groups {
+		roleID, managed := managedRoleID(group.ExternalID, externalIDPrefix)
+		if !managed || roleIDs[roleID] {
+			continue
+		}
+		orphaned = append(orphaned, group)
+	}
+	return orphaned
+}
+
 func planGroupActions(roles []clientRole, groups []outlineGroup, externalIDPrefix string) []groupAction {
 	var actions []groupAction
 	for _, role := range roles {
