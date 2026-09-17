@@ -6,7 +6,7 @@ import (
 	"log/slog"
 )
 
-func run(ctx context.Context, cfg config, logger *slog.Logger) error {
+func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 	keycloak := newKeycloakAdmin(cfg.keycloakURL, cfg.keycloakRealm)
 	if err := keycloak.authenticate(ctx, cfg.keycloakClientID, cfg.keycloakClientSecret); err != nil {
 		return fmt.Errorf("keycloak authentication failed: %w", err)

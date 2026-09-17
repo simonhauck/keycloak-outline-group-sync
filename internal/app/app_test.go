@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/simonhauck/keycloak-outline-group-sync/internal/app"
 )
@@ -39,7 +40,7 @@ func assertGroups(t *testing.T, ol *fakeOutline, want []outlineGroup) {
 	}
 }
 
-func TestRunFailsFastWhenRequiredSettingMissing(t *testing.T) {
+func TestRunOnceFailsFastWhenRequiredSettingMissing(t *testing.T) {
 	for _, name := range []string{
 		"KEYCLOAK_URL",
 		"KEYCLOAK_REALM",
@@ -52,7 +53,7 @@ func TestRunFailsFastWhenRequiredSettingMissing(t *testing.T) {
 			validEnv(t)
 			t.Setenv(name, "")
 
-			err := app.Run(context.Background())
+			err := app.RunOnce(context.Background())
 			if err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -63,7 +64,7 @@ func TestRunFailsFastWhenRequiredSettingMissing(t *testing.T) {
 	}
 }
 
-func TestRunFailsFastWhenSettingInvalid(t *testing.T) {
+func TestRunOnceFailsFastWhenSettingInvalid(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		value string
@@ -72,12 +73,15 @@ func TestRunFailsFastWhenSettingInvalid(t *testing.T) {
 		{"KEYCLOAK_URL", "ftp://keycloak.invalid"},
 		{"OUTLINE_URL", "://"},
 		{"LOG_LEVEL", "loud"},
+		{"SYNC_INTERVAL", "not-a-duration"},
+		{"SYNC_INTERVAL", "-1s"},
+		{"SYNC_INTERVAL", "0s"},
 	} {
 		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
 			validEnv(t)
 			t.Setenv(tc.name, tc.value)
 
-			err := app.Run(context.Background())
+			err := app.RunOnce(context.Background())
 			if err == nil {
 				t.Fatal("expected an error, got nil")
 			}
@@ -88,12 +92,12 @@ func TestRunFailsFastWhenSettingInvalid(t *testing.T) {
 	}
 }
 
-func TestRunWithNoClientRolesWritesNothing(t *testing.T) {
+func TestRunOnceWithNoClientRolesWritesNothing(t *testing.T) {
 	kc := newFakeKeycloak(t, nil)
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -114,7 +118,7 @@ func TestRunWithNoClientRolesWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRunCreatesManagedGroupPerClientRole(t *testing.T) {
+func TestRunOnceCreatesManagedGroupPerClientRole(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{
 		{ID: "role-a-uuid", Name: "Team A"},
 		{ID: "role-b-uuid", Name: "Team B"},
@@ -122,7 +126,7 @@ func TestRunCreatesManagedGroupPerClientRole(t *testing.T) {
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -132,13 +136,13 @@ func TestRunCreatesManagedGroupPerClientRole(t *testing.T) {
 	})
 }
 
-func TestRunAdoptsCaseInsensitiveNameMatch(t *testing.T) {
+func TestRunOnceAdoptsCaseInsensitiveNameMatch(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(outlineGroup{ID: "existing-group", Name: "team a"})
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -149,7 +153,7 @@ func TestRunAdoptsCaseInsensitiveNameMatch(t *testing.T) {
 	}})
 }
 
-func TestRunRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
+func TestRunOnceRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team Renamed"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(outlineGroup{
@@ -159,7 +163,7 @@ func TestRunRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
 	})
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -170,7 +174,7 @@ func TestRunRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
 	}})
 }
 
-func TestRunLeavesUnmanagedGroupsUntouched(t *testing.T) {
+func TestRunOnceLeavesUnmanagedGroupsUntouched(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(
@@ -179,7 +183,7 @@ func TestRunLeavesUnmanagedGroupsUntouched(t *testing.T) {
 	)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -193,7 +197,7 @@ func TestRunLeavesUnmanagedGroupsUntouched(t *testing.T) {
 	}
 }
 
-func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
+func TestRunOncePaginatesClientRolesAndGroups(t *testing.T) {
 	var roles []clientRole
 	var groups []outlineGroup
 	var want []outlineGroup
@@ -214,7 +218,7 @@ func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
 	ol.seedGroups(groups...)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -231,40 +235,40 @@ func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
 	}
 }
 
-func TestSecondRunWithUnchangedStatePerformsNoWrites(t *testing.T) {
+func TestRunOnceTwiceWithUnchangedStatePerformsNoWrites(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
-		t.Fatalf("first Run: %v", err)
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first Sync Run: %v", err)
 	}
 	afterFirst := ol.snapshot()
 	writesAfterFirst := len(ol.writeRequests())
 	if writesAfterFirst == 0 {
-		t.Fatal("first Run should have created the Managed Group")
+		t.Fatal("first Sync Run should have created the Managed Group")
 	}
 
-	if err := app.Run(context.Background()); err != nil {
-		t.Fatalf("second Run: %v", err)
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second Sync Run: %v", err)
 	}
 	if writesAfterSecond := len(ol.writeRequests()); writesAfterSecond != writesAfterFirst {
-		t.Fatalf("second Run performed %d write(s), want none beyond the first Run's %d",
+		t.Fatalf("second Sync Run performed %d write(s), want none beyond the first Sync Run's %d",
 			writesAfterSecond-writesAfterFirst, writesAfterFirst)
 	}
 	if afterSecond := ol.snapshot(); !reflect.DeepEqual(afterFirst, afterSecond) {
-		t.Fatalf("second Run changed Outline groups:\nbefore: %+v\n after: %+v", afterFirst, afterSecond)
+		t.Fatalf("second Sync Run changed Outline groups:\nbefore: %+v\n after: %+v", afterFirst, afterSecond)
 	}
 }
 
-func TestRunRolesClientDefaultsToAuthClient(t *testing.T) {
+func TestRunOnceRolesClientDefaultsToAuthClient(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	kc.clients = []keycloakClientRep{{ID: testRolesUUID, ClientID: testClientID}}
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 	t.Setenv("KEYCLOAK_ROLES_CLIENT_ID", "")
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -275,12 +279,12 @@ func TestRunRolesClientDefaultsToAuthClient(t *testing.T) {
 	}})
 }
 
-func TestRunAuthenticatesWithClientCredentials(t *testing.T) {
+func TestRunOnceAuthenticatesWithClientCredentials(t *testing.T) {
 	kc := newFakeKeycloak(t, nil)
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 
-	if err := app.Run(context.Background()); err != nil {
+	if err := app.RunOnce(context.Background()); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
@@ -307,17 +311,98 @@ func TestRunAuthenticatesWithClientCredentials(t *testing.T) {
 	}
 }
 
-func TestRunFailsWhenRolesClientUnknown(t *testing.T) {
+func TestRunOnceFailsWhenRolesClientUnknown(t *testing.T) {
 	kc := newFakeKeycloak(t, nil)
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 	t.Setenv("KEYCLOAK_ROLES_CLIENT_ID", "does-not-exist")
 
-	err := app.Run(context.Background())
+	err := app.RunOnce(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
 	if !strings.Contains(err.Error(), "does-not-exist") {
 		t.Fatalf("error %q does not name the unknown roles client", err)
 	}
+}
+
+func runServiceUntil(t *testing.T, run func(context.Context) error, observed func() int, want int) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	runDone := make(chan error, 1)
+	go func() { runDone <- run(ctx) }()
+
+	deadline := time.After(5 * time.Second)
+	for observed() < want {
+		select {
+		case err := <-runDone:
+			t.Fatalf("Run returned after %d of %d expected runs: %v", observed(), want, err)
+		case <-deadline:
+			t.Fatalf("timed out after observing %d of %d runs", observed(), want)
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-runDone:
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop after cancellation")
+	}
+	if got := observed(); got < want {
+		t.Fatalf("observed %d runs, want at least %d", got, want)
+	}
+}
+
+func TestRunPerformsSyncRunsOnInterval(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+	t.Setenv("SYNC_INTERVAL", "10ms")
+
+	runServiceUntil(t, app.Run, ol.listCalls, 3)
+}
+
+func TestRunContinuesAfterFailedSyncRun(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	ol := newFakeOutline(t)
+	ol.failNextListGroups(1)
+	syncEnv(t, kc, ol)
+	t.Setenv("SYNC_INTERVAL", "10ms")
+
+	runServiceUntil(t, app.Run, ol.listCalls, 2)
+
+	assertGroups(t, ol, []outlineGroup{{
+		ID:         "created-group-1",
+		Name:       "Team A",
+		ExternalID: "keycloak:test:roles-client:role-uuid",
+	}})
+}
+
+func TestRunDoesNotOverlapSyncRuns(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	ol.listGroupsDelay = 100 * time.Millisecond
+	syncEnv(t, kc, ol)
+	t.Setenv("SYNC_INTERVAL", "10ms")
+
+	runServiceUntil(t, app.Run, ol.listCalls, 2)
+
+	if got := ol.maxListInFlight(); got != 1 {
+		t.Fatalf("max concurrent groups.list calls = %d, want 1 (Sync Runs must not overlap)", got)
+	}
+}
+
+func TestRunPerformsSyncRunAtStartup(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	ol := newFakeOutline(t)
+	syncEnv(t, kc, ol)
+	t.Setenv("SYNC_INTERVAL", "1h")
+
+	runServiceUntil(t, app.Run, ol.listCalls, 1)
 }

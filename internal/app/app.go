@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 type config struct {
@@ -17,19 +19,47 @@ type config struct {
 	rolesClientID        string
 	outlineURL           string
 	outlineToken         string
+	syncInterval         time.Duration
 	logLevel             slog.Level
 }
 
-// Run performs one Sync Run using the configuration from the process
-// environment. It is the single entry point exercised by tests.
+// RunOnce performs a single Sync Run using the configuration from the process
+// environment and returns its error.
+func RunOnce(ctx context.Context) error {
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	return runSync(ctx, cfg, newLogger(cfg.logLevel))
+}
+
+// Run runs the Sync Service: a Sync Run at startup, then another on every
+// SYNC_INTERVAL tick until ctx is cancelled. Failed runs are logged and do not
+// stop the loop; Run returns nil once ctx is done.
 func Run(ctx context.Context) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
+	logger := newLogger(cfg.logLevel)
 
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.logLevel}))
-	return run(ctx, cfg, logger)
+	ticker := time.NewTicker(cfg.syncInterval)
+	defer ticker.Stop()
+
+	for {
+		if err := runSync(ctx, cfg, logger); err != nil && (ctx.Err() == nil || !errors.Is(err, context.Canceled)) {
+			logger.Error("sync run failed", "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+		}
+	}
+}
+
+func newLogger(level slog.Level) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
 func loadConfig() (config, error) {
@@ -68,6 +98,15 @@ func loadConfig() (config, error) {
 		if err := validateURL(setting.value); err != nil {
 			return config{}, fmt.Errorf("invalid %s: %w", setting.name, err)
 		}
+	}
+
+	cfg.syncInterval = 5 * time.Minute
+	if raw := os.Getenv("SYNC_INTERVAL"); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil || interval <= 0 {
+			return config{}, fmt.Errorf("invalid SYNC_INTERVAL: %q must be a positive duration", raw)
+		}
+		cfg.syncInterval = interval
 	}
 
 	cfg.logLevel = slog.LevelInfo
