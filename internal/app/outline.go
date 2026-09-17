@@ -92,23 +92,28 @@ func (o *outlineClient) listUsersByEmails(ctx context.Context, emails []string) 
 	return users, nil
 }
 
-func (o *outlineClient) groupMemberIDs(ctx context.Context, groupID string) ([]string, error) {
-	var ids []string
+func (o *outlineClient) groupMembers(ctx context.Context, groupID string) ([]outlineUser, error) {
+	var members []outlineUser
 	for offset := 0; ; {
 		var data struct {
 			GroupMemberships []struct {
 				UserID string `json:"userId"`
 			} `json:"groupMemberships"`
+			Users []outlineUser `json:"users"`
 		}
 		_, err := o.call(ctx, "groups.memberships", map[string]any{"id": groupID, "limit": outlinePageSize, "offset": offset}, &data)
 		if err != nil {
 			return nil, err
 		}
-		for _, membership := range data.GroupMemberships {
-			ids = append(ids, membership.UserID)
+		if len(data.Users) > 0 {
+			members = append(members, data.Users...)
+		} else {
+			for _, membership := range data.GroupMemberships {
+				members = append(members, outlineUser{ID: membership.UserID})
+			}
 		}
 		if len(data.GroupMemberships) == 0 {
-			return ids, nil
+			return members, nil
 		}
 		offset += len(data.GroupMemberships)
 	}

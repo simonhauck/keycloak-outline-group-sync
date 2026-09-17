@@ -41,6 +41,42 @@ func assertGroups(t *testing.T, ol *fakeOutline, want []outlineGroup) {
 	}
 }
 
+func seedDryRunFixture(t *testing.T) (*fakeKeycloak, *fakeOutline) {
+	t.Helper()
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-a-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
+		{ID: "role-c-uuid", Name: "Team C"},
+	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+		keycloakUser{
+			ID: "kc-erin", Username: "erin", Email: "erin@example.com", Enabled: true,
+			DirectRoles: []string{"Team C"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(
+		outlineGroup{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
+		outlineGroup{ID: "adoptable-c", Name: "team c"},
+	)
+	ol.seedUsers(
+		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+		outlineUser{ID: "outline-erin", Email: "erin@example.com"},
+	)
+	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+	return kc, ol
+}
+
 func TestRunOnceFailsFastWhenRequiredSettingMissing(t *testing.T) {
 	for _, name := range []string{
 		"KEYCLOAK_URL",
@@ -895,37 +931,7 @@ func TestRunOnceReconcilesMembershipWhenGroupUpdateFails(t *testing.T) {
 }
 
 func TestRunOnceDryRunWritesNothing(t *testing.T) {
-	kc := newFakeKeycloak(t, []clientRole{
-		{ID: "role-a-uuid", Name: "Team A"},
-		{ID: "role-b-uuid", Name: "Team B"},
-		{ID: "role-c-uuid", Name: "Team C"},
-	})
-	kc.seedUsers(
-		keycloakUser{
-			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
-			DirectRoles: []string{"Team A"},
-		},
-		keycloakUser{
-			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
-			DirectRoles: []string{"Team B"},
-		},
-		keycloakUser{
-			ID: "kc-erin", Username: "erin", Email: "erin@example.com", Enabled: true,
-			DirectRoles: []string{"Team C"},
-		},
-	)
-	ol := newFakeOutline(t)
-	ol.seedGroups(
-		outlineGroup{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
-		outlineGroup{ID: "adoptable-c", Name: "team c"},
-	)
-	ol.seedUsers(
-		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
-		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
-		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
-		outlineUser{ID: "outline-erin", Email: "erin@example.com"},
-	)
-	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+	kc, ol := seedDryRunFixture(t)
 	syncEnv(t, kc, ol)
 	t.Setenv("DRY_RUN", "true")
 
@@ -944,37 +950,7 @@ func TestRunOnceDryRunWritesNothing(t *testing.T) {
 }
 
 func TestRunOnceDryRunThenRealRunAppliesPlan(t *testing.T) {
-	kc := newFakeKeycloak(t, []clientRole{
-		{ID: "role-a-uuid", Name: "Team A"},
-		{ID: "role-b-uuid", Name: "Team B"},
-		{ID: "role-c-uuid", Name: "Team C"},
-	})
-	kc.seedUsers(
-		keycloakUser{
-			ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
-			DirectRoles: []string{"Team A"},
-		},
-		keycloakUser{
-			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
-			DirectRoles: []string{"Team B"},
-		},
-		keycloakUser{
-			ID: "kc-erin", Username: "erin", Email: "erin@example.com", Enabled: true,
-			DirectRoles: []string{"Team C"},
-		},
-	)
-	ol := newFakeOutline(t)
-	ol.seedGroups(
-		outlineGroup{ID: "managed-a", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
-		outlineGroup{ID: "adoptable-c", Name: "team c"},
-	)
-	ol.seedUsers(
-		outlineUser{ID: "outline-alice", Email: "alice@example.com"},
-		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
-		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
-		outlineUser{ID: "outline-erin", Email: "erin@example.com"},
-	)
-	ol.seedMembership("managed-a", "outline-alice", "outline-bob")
+	kc, ol := seedDryRunFixture(t)
 	syncEnv(t, kc, ol)
 
 	t.Setenv("DRY_RUN", "true")

@@ -60,21 +60,19 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 
 	failures := applyPlan(ctx, outline, actions, roles, memberships, desiredByRole, protectedAccounts, logger, &summary, cfg.dryRun)
 
+	message := "sync run complete"
 	if cfg.dryRun {
-		logger.Info("dry run complete: no writes were made",
-			"groupsCreated", summary.groupsCreated,
-			"groupsAdopted", summary.groupsAdopted,
-			"groupsRenamed", summary.groupsRenamed,
-			"membersAdded", summary.membersAdded,
-			"membersRemoved", summary.membersRemoved,
-			"skippedUsers", summary.skippedUsers,
-			"orphanedGroups", summary.orphanedGroups,
-			"failures", 0,
-		)
-		return nil
+		message = "dry run complete: no writes were made"
 	}
+	logRunSummary(logger, message, &summary, len(failures))
+	if len(failures) > 0 {
+		return fmt.Errorf("%d Outline operation(s) failed: %w", len(failures), errors.Join(failures...))
+	}
+	return nil
+}
 
-	logger.Info("sync run complete",
+func logRunSummary(logger *slog.Logger, message string, summary *runSummary, failures int) {
+	logger.Info(message,
 		"groupsCreated", summary.groupsCreated,
 		"groupsAdopted", summary.groupsAdopted,
 		"groupsRenamed", summary.groupsRenamed,
@@ -82,12 +80,8 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 		"membersRemoved", summary.membersRemoved,
 		"skippedUsers", summary.skippedUsers,
 		"orphanedGroups", summary.orphanedGroups,
-		"failures", len(failures),
+		"failures", failures,
 	)
-	if len(failures) > 0 {
-		return fmt.Errorf("%d Outline operation(s) failed: %w", len(failures), errors.Join(failures...))
-	}
-	return nil
 }
 
 type runSummary struct {
@@ -239,17 +233,17 @@ func planDesiredMembers(
 	return desiredByRole, protectedAccounts
 }
 
-func readMemberships(ctx context.Context, outline *outlineClient, actions []groupAction) (map[string][]string, error) {
-	memberships := map[string][]string{}
+func readMemberships(ctx context.Context, outline *outlineClient, actions []groupAction) (map[string][]outlineUser, error) {
+	memberships := map[string][]outlineUser{}
 	for _, action := range actions {
 		if action.kind == groupActionCreate {
 			continue
 		}
-		memberIDs, err := outline.groupMemberIDs(ctx, action.groupID)
+		members, err := outline.groupMembers(ctx, action.groupID)
 		if err != nil {
 			return nil, fmt.Errorf("listing members of Outline Group %q: %w", action.name, err)
 		}
-		memberships[action.groupID] = memberIDs
+		memberships[action.groupID] = members
 	}
 	return memberships, nil
 }
@@ -259,7 +253,7 @@ func applyPlan(
 	outline *outlineClient,
 	actions []groupAction,
 	roles []clientRole,
-	memberships map[string][]string,
+	memberships map[string][]outlineUser,
 	desiredByRole map[string][]outlineUser,
 	protectedAccounts map[string]bool,
 	logger *slog.Logger,
@@ -318,6 +312,7 @@ func applyGroupAction(
 		if dryRun {
 			logger.Info("dry run: would adopt Outline Group",
 				"group", action.name,
+				"groupId", action.groupID,
 				"externalId", action.externalID,
 			)
 			summary.groupsAdopted++
@@ -331,7 +326,10 @@ func applyGroupAction(
 		return group, nil
 	case groupActionRename:
 		if dryRun {
-			logger.Info("dry run: would rename Managed Group", "group", action.name)
+			logger.Info("dry run: would rename Managed Group",
+				"group", action.name,
+				"groupId", action.groupID,
+			)
 			summary.groupsRenamed++
 			return outlineGroup{ID: action.groupID, Name: action.name, ExternalID: action.externalID}, nil
 		}
@@ -350,7 +348,7 @@ func reconcileMembers(
 	ctx context.Context,
 	outline *outlineClient,
 	group outlineGroup,
-	current []string,
+	current []outlineUser,
 	desired []outlineUser,
 	protectedAccounts map[string]bool,
 	logger *slog.Logger,
@@ -358,8 +356,8 @@ func reconcileMembers(
 	dryRun bool,
 ) error {
 	currentMembers := map[string]bool{}
-	for _, userID := range current {
-		currentMembers[userID] = true
+	for _, account := range current {
+		currentMembers[account.ID] = true
 	}
 	desiredMembers := map[string]bool{}
 	for _, account := range desired {
@@ -367,17 +365,21 @@ func reconcileMembers(
 	}
 
 	var failures []error
-	for _, userID := range current {
-		if desiredMembers[userID] || protectedAccounts[userID] {
+	for _, account := range current {
+		if desiredMembers[account.ID] || protectedAccounts[account.ID] {
 			continue
 		}
 		if dryRun {
-			logger.Info("dry run: would remove member", "group", group.Name, "userId", userID)
+			logger.Info("dry run: would remove member",
+				"group", group.Name,
+				"account", accountLabel(account),
+				"accountId", account.ID,
+			)
 			summary.membersRemoved++
 			continue
 		}
-		if err := outline.removeUserFromGroup(ctx, group.ID, userID); err != nil {
-			failures = append(failures, fmt.Errorf("removing %s from Outline Group %q: %w", userID, group.Name, err))
+		if err := outline.removeUserFromGroup(ctx, group.ID, account.ID); err != nil {
+			failures = append(failures, fmt.Errorf("removing %s from Outline Group %q: %w", accountLabel(account), group.Name, err))
 			continue
 		}
 		summary.membersRemoved++
@@ -389,19 +391,26 @@ func reconcileMembers(
 		if dryRun {
 			logger.Info("dry run: would add member",
 				"group", group.Name,
-				"user", account.Email,
-				"userId", account.ID,
+				"account", accountLabel(account),
+				"accountId", account.ID,
 			)
 			summary.membersAdded++
 			continue
 		}
 		if err := outline.addUserToGroup(ctx, group.ID, account.ID); err != nil {
-			failures = append(failures, fmt.Errorf("adding %s to Outline Group %q: %w", account.Email, group.Name, err))
+			failures = append(failures, fmt.Errorf("adding %s to Outline Group %q: %w", accountLabel(account), group.Name, err))
 			continue
 		}
 		summary.membersAdded++
 	}
 	return errors.Join(failures...)
+}
+
+func accountLabel(account outlineUser) string {
+	if account.Email != "" {
+		return account.Email
+	}
+	return account.ID
 }
 
 func normalizeEmail(email string) string {
