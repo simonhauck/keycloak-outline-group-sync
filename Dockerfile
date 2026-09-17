@@ -10,8 +10,8 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
     -o /out/keycloak-outline-group-sync ./cmd/keycloak-outline-group-sync
 
 FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
-RUN apk add --no-cache ca-certificates \
-    && addgroup -S -g 10001 app \
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN addgroup -S -g 10001 app \
     && adduser -S -D -H -u 10001 -G app app
 COPY --from=build /out/keycloak-outline-group-sync /usr/local/bin/keycloak-outline-group-sync
 USER 10001:10001

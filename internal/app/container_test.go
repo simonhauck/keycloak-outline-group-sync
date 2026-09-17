@@ -1,5 +1,8 @@
 //go:build docker
 
+// These tests build and exercise the container image. They need a Linux host
+// with Docker and run explicitly: go test -tags docker ./internal/app/.
+
 package app_test
 
 import (
@@ -23,15 +26,21 @@ func buildContainerImage(t *testing.T) {
 	}
 }
 
+func dockerRun(t *testing.T, args ...string) string {
+	t.Helper()
+	command := exec.Command("docker", append([]string{"run", "--rm"}, args...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("docker run %v: %v\n%s", args, err, output)
+	}
+	return string(output)
+}
+
 func TestContainerImageRunsAsNonRoot(t *testing.T) {
 	buildContainerImage(t)
 
-	command := exec.Command("docker", "run", "--rm", "--entrypoint", "id", containerImage)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker run id: %v\n%s", err, output)
-	}
-	if strings.Contains(string(output), "uid=0") {
+	output := dockerRun(t, "--entrypoint", "id", containerImage)
+	if strings.Contains(output, "uid=0") {
 		t.Fatalf("container runs as root:\n%s", output)
 	}
 }
@@ -39,15 +48,17 @@ func TestContainerImageRunsAsNonRoot(t *testing.T) {
 func TestContainerImageHasNoBuildToolchain(t *testing.T) {
 	buildContainerImage(t)
 
-	command := exec.Command("docker", "run", "--rm", "--entrypoint", "/bin/sh",
-		containerImage, "-c", "command -v go || true; command -v gcc || true; command -v cc || true")
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker run sh: %v\n%s", err, output)
-	}
-	if strings.TrimSpace(string(output)) != "" {
+	output := dockerRun(t, "--entrypoint", "/bin/sh", containerImage, "-c",
+		"command -v go || true; command -v gcc || true; command -v cc || true")
+	if strings.TrimSpace(output) != "" {
 		t.Fatalf("runtime image contains a build toolchain:\n%s", output)
 	}
+}
+
+func TestContainerImageShipsCABundle(t *testing.T) {
+	buildContainerImage(t)
+
+	dockerRun(t, "--entrypoint", "ls", containerImage, "/etc/ssl/certs/ca-certificates.crt")
 }
 
 func TestContainerImageRunsOnceAgainstFakes(t *testing.T) {
@@ -61,17 +72,12 @@ func TestContainerImageRunsOnceAgainstFakes(t *testing.T) {
 	ol := newFakeOutline(t)
 	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
 
-	args := []string{"run", "--rm", "--network", "host"}
+	args := []string{"--network", "host"}
 	for _, pair := range serviceEnv(kc, ol) {
 		args = append(args, "-e", pair)
 	}
 	args = append(args, containerImage, "--once")
-
-	command := exec.Command("docker", args...)
-	output, err := command.CombinedOutput()
-	if err != nil {
-		t.Fatalf("docker run --once: %v\n%s", err, output)
-	}
+	dockerRun(t, args...)
 
 	assertGroups(t, ol, []outlineGroup{{
 		ID:         "created-group-1",

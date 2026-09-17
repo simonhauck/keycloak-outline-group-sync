@@ -1,5 +1,8 @@
 services:
   keycloak-outline-group-sync:
+    # Build from this repository, or pull the published image.
+    # Pin a released version instead of latest in production.
+    build: .
     image: ghcr.io/simonhauck/keycloak-outline-group-sync:latest
     restart: unless-stopped
     environment:
@@ -21,5 +24,5 @@ services:
       DRY_RUN: "true"
       # debug, info, warn or error (default info).
       LOG_LEVEL: info
-    # To run as a one-shot job under an external scheduler instead, uncomment:
+    # To run a single Sync Run under an external scheduler instead, uncomment:
     # command: ["--once"]
