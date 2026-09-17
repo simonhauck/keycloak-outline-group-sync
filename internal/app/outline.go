@@ -39,15 +39,15 @@ func (o *outlineClient) listGroups(ctx context.Context) ([]outlineGroup, error) 
 		var data struct {
 			Groups []outlineGroup `json:"groups"`
 		}
-		envelope, err := o.call(ctx, "groups.list", map[string]any{"limit": outlinePageSize, "offset": offset}, &data)
+		_, err := o.call(ctx, "groups.list", map[string]any{"limit": outlinePageSize, "offset": offset}, &data)
 		if err != nil {
 			return nil, err
 		}
 		groups = append(groups, data.Groups...)
-		offset += len(data.Groups)
-		if len(data.Groups) == 0 || offset >= envelope.Pagination.Total {
+		if len(data.Groups) == 0 {
 			return groups, nil
 		}
+		offset += len(data.Groups)
 	}
 }
 
@@ -68,14 +68,9 @@ func (o *outlineClient) updateGroup(ctx context.Context, id, name, externalID st
 }
 
 type outlineEnvelope struct {
-	OK         bool            `json:"ok"`
-	Error      string          `json:"error"`
-	Data       json.RawMessage `json:"data"`
-	Pagination struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
-		Total  int `json:"total"`
-	} `json:"pagination"`
+	OK    bool            `json:"ok"`
+	Error string          `json:"error"`
+	Data  json.RawMessage `json:"data"`
 }
 
 func (o *outlineClient) call(ctx context.Context, route string, payload, data any) (outlineEnvelope, error) {

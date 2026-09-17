@@ -31,7 +31,7 @@ type recordedRequest struct {
 	Authorization string
 }
 
-type keycloakRole struct {
+type clientRole struct {
 	ID   string
 	Name string
 }
@@ -44,7 +44,7 @@ type keycloakClientRep struct {
 type fakeKeycloak struct {
 	realm    string
 	clients  []keycloakClientRep
-	roles    []keycloakRole
+	roles    []clientRole
 	pageSize int
 
 	mu       sync.Mutex
@@ -52,7 +52,7 @@ type fakeKeycloak struct {
 	server   *httptest.Server
 }
 
-func newFakeKeycloak(t *testing.T, roles []keycloakRole) *fakeKeycloak {
+func newFakeKeycloak(t *testing.T, roles []clientRole) *fakeKeycloak {
 	t.Helper()
 	f := &fakeKeycloak{
 		realm:   testRealm,

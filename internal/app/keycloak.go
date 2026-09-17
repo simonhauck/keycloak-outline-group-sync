@@ -13,27 +13,27 @@ import (
 
 const keycloakPageSize = 100
 
-type keycloakClient struct {
+type keycloakAdmin struct {
 	baseURL string
 	realm   string
 	http    *http.Client
 	token   string
 }
 
-type keycloakRole struct {
+type clientRole struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
 }
 
-func newKeycloakClient(baseURL, realm string) *keycloakClient {
-	return &keycloakClient{
+func newKeycloakAdmin(baseURL, realm string) *keycloakAdmin {
+	return &keycloakAdmin{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		realm:   realm,
 		http:    &http.Client{Timeout: 30 * time.Second},
 	}
 }
 
-func (c *keycloakClient) authenticate(ctx context.Context, clientID, clientSecret string) error {
+func (c *keycloakAdmin) authenticate(ctx context.Context, clientID, clientSecret string) error {
 	form := url.Values{
 		"grant_type":    {"client_credentials"},
 		"client_id":     {clientID},
@@ -61,7 +61,7 @@ func (c *keycloakClient) authenticate(ctx context.Context, clientID, clientSecre
 	return nil
 }
 
-func (c *keycloakClient) clientUUID(ctx context.Context, clientID string) (string, error) {
+func (c *keycloakAdmin) clientUUID(ctx context.Context, clientID string) (string, error) {
 	endpoint := c.baseURL + "/admin/realms/" + url.PathEscape(c.realm) + "/clients?clientId=" + url.QueryEscape(clientID)
 	body, status, err := c.do(ctx, http.MethodGet, endpoint, nil, "")
 	if err != nil {
@@ -86,8 +86,8 @@ func (c *keycloakClient) clientUUID(ctx context.Context, clientID string) (strin
 	return "", fmt.Errorf("client %q not found in realm %q", clientID, c.realm)
 }
 
-func (c *keycloakClient) clientRoles(ctx context.Context, clientUUID string) ([]keycloakRole, error) {
-	var roles []keycloakRole
+func (c *keycloakAdmin) clientRoles(ctx context.Context, clientUUID string) ([]clientRole, error) {
+	var roles []clientRole
 	for first := 0; ; {
 		endpoint := fmt.Sprintf("%s/admin/realms/%s/clients/%s/roles?first=%d&max=%d",
 			c.baseURL, url.PathEscape(c.realm), url.PathEscape(clientUUID), first, keycloakPageSize)
@@ -99,7 +99,7 @@ func (c *keycloakClient) clientRoles(ctx context.Context, clientUUID string) ([]
 			return nil, fmt.Errorf("role listing returned status %d: %s", status, strings.TrimSpace(string(body)))
 		}
 
-		var page []keycloakRole
+		var page []clientRole
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, fmt.Errorf("decoding role listing response: %w", err)
 		}
@@ -111,7 +111,7 @@ func (c *keycloakClient) clientRoles(ctx context.Context, clientUUID string) ([]
 	}
 }
 
-func (c *keycloakClient) do(ctx context.Context, method, endpoint string, body io.Reader, contentType string) ([]byte, int, error) {
+func (c *keycloakAdmin) do(ctx context.Context, method, endpoint string, body io.Reader, contentType string) ([]byte, int, error) {
 	request, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
 		return nil, 0, err

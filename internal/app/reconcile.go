@@ -24,7 +24,7 @@ func managedExternalIDPrefix(cfg config) string {
 	return fmt.Sprintf("keycloak:%s:%s:", cfg.keycloakRealm, cfg.rolesClientID)
 }
 
-func planGroupActions(roles []keycloakRole, groups []outlineGroup, externalIDPrefix string) []groupAction {
+func planGroupActions(roles []clientRole, groups []outlineGroup, externalIDPrefix string) []groupAction {
 	var actions []groupAction
 	for _, role := range roles {
 		externalID := externalIDPrefix + role.ID

@@ -32,6 +32,13 @@ func syncEnv(t *testing.T, kc *fakeKeycloak, ol *fakeOutline) {
 	t.Setenv("LOG_LEVEL", "error")
 }
 
+func assertGroups(t *testing.T, ol *fakeOutline, want []outlineGroup) {
+	t.Helper()
+	if got := ol.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
 func TestRunFailsFastWhenRequiredSettingMissing(t *testing.T) {
 	for _, name := range []string{
 		"KEYCLOAK_URL",
@@ -108,7 +115,7 @@ func TestRunWithNoClientRolesWritesNothing(t *testing.T) {
 }
 
 func TestRunCreatesManagedGroupPerClientRole(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{
+	kc := newFakeKeycloak(t, []clientRole{
 		{ID: "role-a-uuid", Name: "Team A"},
 		{ID: "role-b-uuid", Name: "Team B"},
 	})
@@ -119,18 +126,14 @@ func TestRunCreatesManagedGroupPerClientRole(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{
+	assertGroups(t, ol, []outlineGroup{
 		{ID: "created-group-1", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-a-uuid"},
 		{ID: "created-group-2", Name: "Team B", ExternalID: "keycloak:test:roles-client:role-b-uuid"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	})
 }
 
 func TestRunAdoptsCaseInsensitiveNameMatch(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team A"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(outlineGroup{ID: "existing-group", Name: "team a"})
 	syncEnv(t, kc, ol)
@@ -139,19 +142,15 @@ func TestRunAdoptsCaseInsensitiveNameMatch(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{{
+	assertGroups(t, ol, []outlineGroup{{
 		ID:         "existing-group",
 		Name:       "Team A",
 		ExternalID: "keycloak:test:roles-client:role-uuid",
-	}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	}})
 }
 
 func TestRunRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team Renamed"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team Renamed"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(outlineGroup{
 		ID:         "managed-group",
@@ -164,19 +163,15 @@ func TestRunRenamesManagedGroupWhenClientRoleRenamed(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{{
+	assertGroups(t, ol, []outlineGroup{{
 		ID:         "managed-group",
 		Name:       "Team Renamed",
 		ExternalID: "keycloak:test:roles-client:role-uuid",
-	}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	}})
 }
 
 func TestRunLeavesUnmanagedGroupsUntouched(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team A"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	ol.seedGroups(
 		outlineGroup{ID: "manual-group", Name: "Handbook"},
@@ -188,27 +183,23 @@ func TestRunLeavesUnmanagedGroupsUntouched(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{
+	assertGroups(t, ol, []outlineGroup{
 		{ID: "manual-group", Name: "Handbook"},
 		{ID: "foreign-group", Name: "Team A", ExternalID: "other-sync:42"},
 		{ID: "created-group-1", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid"},
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	})
 	if writes := ol.writeRequests(); len(writes) != 1 || writes[0].Path != "/api/groups.create" {
 		t.Fatalf("expected only the create write, got: %+v", writes)
 	}
 }
 
 func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
-	var roles []keycloakRole
+	var roles []clientRole
 	var groups []outlineGroup
 	var want []outlineGroup
 	for i := 1; i <= 5; i++ {
 		name := fmt.Sprintf("Team %d", i)
-		roles = append(roles, keycloakRole{ID: fmt.Sprintf("role-%d", i), Name: name})
+		roles = append(roles, clientRole{ID: fmt.Sprintf("role-%d", i), Name: name})
 		groups = append(groups, outlineGroup{ID: fmt.Sprintf("group-%d", i), Name: strings.ToLower(name)})
 		want = append(want, outlineGroup{
 			ID:         fmt.Sprintf("group-%d", i),
@@ -227,9 +218,7 @@ func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	if got := ol.snapshot(); !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	assertGroups(t, ol, want)
 
 	var listCalls int
 	for _, request := range ol.allRequests() {
@@ -243,7 +232,7 @@ func TestRunPaginatesClientRolesAndGroups(t *testing.T) {
 }
 
 func TestSecondRunWithUnchangedStatePerformsNoWrites(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team A"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
 
@@ -269,7 +258,7 @@ func TestSecondRunWithUnchangedStatePerformsNoWrites(t *testing.T) {
 }
 
 func TestRunRolesClientDefaultsToAuthClient(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team A"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	kc.clients = []keycloakClientRep{{ID: testRolesUUID, ClientID: testClientID}}
 	ol := newFakeOutline(t)
 	syncEnv(t, kc, ol)
@@ -279,15 +268,11 @@ func TestRunRolesClientDefaultsToAuthClient(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{{
+	assertGroups(t, ol, []outlineGroup{{
 		ID:         "created-group-1",
 		Name:       "Team A",
 		ExternalID: "keycloak:test:sync-client:role-uuid",
-	}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	}})
 }
 
 func TestRunAuthenticatesWithClientCredentials(t *testing.T) {

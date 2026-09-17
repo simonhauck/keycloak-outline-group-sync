@@ -46,7 +46,7 @@ func serviceEnv(kc *fakeKeycloak, ol *fakeOutline) []string {
 }
 
 func TestServiceBinaryRunsOnceAndExitsZero(t *testing.T) {
-	kc := newFakeKeycloak(t, []keycloakRole{{ID: "role-uuid", Name: "Team A"}})
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
 	ol := newFakeOutline(t)
 
 	command := exec.Command(serviceBinary, "--once")
@@ -56,15 +56,11 @@ func TestServiceBinaryRunsOnceAndExitsZero(t *testing.T) {
 		t.Fatalf("service exited with error: %v\n%s", err, output)
 	}
 
-	got := ol.snapshot()
-	want := []outlineGroup{{
+	assertGroups(t, ol, []outlineGroup{{
 		ID:         "created-group-1",
 		Name:       "Team A",
 		ExternalID: "keycloak:test:roles-client:role-uuid",
-	}}
-	if len(got) != 1 || got[0] != want[0] {
-		t.Fatalf("Outline groups:\n got: %+v\nwant: %+v", got, want)
-	}
+	}})
 }
 
 func TestServiceBinaryFailsFastOnMissingConfiguration(t *testing.T) {

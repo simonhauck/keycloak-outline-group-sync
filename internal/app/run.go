@@ -7,7 +7,7 @@ import (
 )
 
 func run(ctx context.Context, cfg config, logger *slog.Logger) error {
-	keycloak := newKeycloakClient(cfg.keycloakURL, cfg.keycloakRealm)
+	keycloak := newKeycloakAdmin(cfg.keycloakURL, cfg.keycloakRealm)
 	if err := keycloak.authenticate(ctx, cfg.keycloakClientID, cfg.keycloakClientSecret); err != nil {
 		return fmt.Errorf("keycloak authentication failed: %w", err)
 	}
