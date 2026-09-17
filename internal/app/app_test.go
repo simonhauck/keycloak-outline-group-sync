@@ -840,3 +840,55 @@ func TestRunOnceWritesNothingWhenRoleMappingReadFails(t *testing.T) {
 		t.Fatalf("a failed Keycloak read must abort before touching Outline, got: %+v", requests)
 	}
 }
+
+func TestRunOnceDoesNotRemoveMemberSharingAnEmail(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-eve-one", Username: "eve-one", Email: "eve@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-eve-two", Username: "eve-two", Email: "eve@example.com", Enabled: true,
+			DirectRoles: []string{"Team A"},
+		},
+	)
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-eve", Email: "eve@example.com"})
+	ol.seedMembership("managed-group", "outline-eve")
+	syncEnv(t, kc, ol)
+
+	if err := app.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	assertMembers(t, ol, "managed-group", []string{"outline-eve"})
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("expected no writes for an ambiguous email, got: %+v", writes)
+	}
+}
+
+func TestRunOnceReconcilesMembershipWhenGroupUpdateFails(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team Renamed"}})
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+		DirectRoles: []string{"Team Renamed"},
+	})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "managed-group", Name: "Team Old", ExternalID: "keycloak:test:roles-client:role-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.failNextUpdateGroup(1)
+	syncEnv(t, kc, ol)
+
+	err := app.RunOnce(context.Background())
+	if err == nil {
+		t.Fatal("expected the Sync Run to report the failed rename")
+	}
+
+	assertMembers(t, ol, "managed-group", []string{"outline-alice"})
+}

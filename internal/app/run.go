@@ -25,7 +25,7 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("listing users: %w", err)
 	}
-	roleHolders, skippedUsers, err := findRoleHolders(ctx, keycloak, users, rolesUUID, logger)
+	scan, err := findRoleHolders(ctx, keycloak, users, rolesUUID, logger)
 	if err != nil {
 		return err
 	}
@@ -39,10 +39,13 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 	externalIDPrefix := managedExternalIDPrefix(cfg)
 	actions := planGroupActions(roles, groups, externalIDPrefix)
 	orphanedGroups := findOrphanedGroups(groups, roles, externalIDPrefix)
-	accounts, err := resolveAccounts(ctx, outline, actions, roleHolders)
+
+	summary := runSummary{skippedUsers: scan.skippedUsers, orphanedGroups: len(orphanedGroups)}
+	accounts, err := resolveAccounts(ctx, outline, roles, scan)
 	if err != nil {
 		return err
 	}
+	desiredByRole, protectedAccounts := planDesiredMembers(roles, scan, accounts, logger, &summary)
 	memberships, err := readMemberships(ctx, outline, actions)
 	if err != nil {
 		return err
@@ -55,8 +58,7 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 		)
 	}
 
-	summary := runSummary{skippedUsers: skippedUsers, orphanedGroups: len(orphanedGroups)}
-	failures := applyPlan(ctx, outline, actions, roles, memberships, roleHolders, accounts, logger, &summary)
+	failures := applyPlan(ctx, outline, actions, roles, memberships, desiredByRole, protectedAccounts, &summary)
 
 	logger.Info("sync run complete",
 		"groupsCreated", summary.groupsCreated,
@@ -84,15 +86,25 @@ type runSummary struct {
 	orphanedGroups int
 }
 
+type roleHolderScan struct {
+	holders         map[string][]keycloakUser
+	ambiguousEmails map[string]bool
+	skippedUsers    int
+}
+
 func findRoleHolders(
 	ctx context.Context,
 	keycloak *keycloakAdmin,
 	users []keycloakUser,
 	rolesUUID string,
 	logger *slog.Logger,
-) (map[string][]keycloakUser, int, error) {
+) (roleHolderScan, error) {
+	scan := roleHolderScan{
+		holders:         map[string][]keycloakUser{},
+		ambiguousEmails: map[string]bool{},
+	}
+
 	var candidates []keycloakUser
-	skippedUsers := 0
 	emailCount := map[string]int{}
 	for _, user := range users {
 		if !user.Enabled {
@@ -100,7 +112,7 @@ func findRoleHolders(
 				"reason", "disabled",
 				"username", user.Username,
 			)
-			skippedUsers++
+			scan.skippedUsers++
 			continue
 		}
 		if user.Email == "" {
@@ -108,7 +120,7 @@ func findRoleHolders(
 				"reason", "no email",
 				"username", user.Username,
 			)
-			skippedUsers++
+			scan.skippedUsers++
 			continue
 		}
 		email := normalizeEmail(user.Email)
@@ -116,7 +128,6 @@ func findRoleHolders(
 		candidates = append(candidates, user)
 	}
 
-	holders := map[string][]keycloakUser{}
 	for _, user := range candidates {
 		email := normalizeEmail(user.Email)
 		if emailCount[email] > 1 {
@@ -125,35 +136,37 @@ func findRoleHolders(
 				"username", user.Username,
 				"email", user.Email,
 			)
-			skippedUsers++
+			scan.skippedUsers++
+			scan.ambiguousEmails[email] = true
 			continue
 		}
 		mappings, err := keycloak.effectiveClientRoles(ctx, user.ID, rolesUUID)
 		if err != nil {
-			return nil, 0, fmt.Errorf("reading Client Roles of user %q: %w", user.Username, err)
+			return roleHolderScan{}, fmt.Errorf("reading Client Roles of user %q: %w", user.Username, err)
 		}
 		for _, role := range mappings {
-			holders[role.ID] = append(holders[role.ID], user)
+			scan.holders[role.ID] = append(scan.holders[role.ID], user)
 		}
 	}
-	return holders, skippedUsers, nil
+	return scan, nil
 }
 
-func resolveAccounts(
-	ctx context.Context,
-	outline *outlineClient,
-	actions []groupAction,
-	roleHolders map[string][]keycloakUser,
-) (map[string]outlineUser, error) {
-	var emails []string
+func resolveAccounts(ctx context.Context, outline *outlineClient, roles []clientRole, scan roleHolderScan) (map[string]outlineUser, error) {
 	seen := map[string]bool{}
-	for _, action := range actions {
-		for _, holder := range roleHolders[action.roleID] {
+	var emails []string
+	for _, role := range roles {
+		for _, holder := range scan.holders[role.ID] {
 			email := normalizeEmail(holder.Email)
 			if !seen[email] {
 				seen[email] = true
 				emails = append(emails, email)
 			}
+		}
+	}
+	for email := range scan.ambiguousEmails {
+		if !seen[email] {
+			seen[email] = true
+			emails = append(emails, email)
 		}
 	}
 
@@ -171,6 +184,47 @@ func resolveAccounts(
 	return accounts, nil
 }
 
+func planDesiredMembers(
+	roles []clientRole,
+	scan roleHolderScan,
+	accounts map[string]outlineUser,
+	logger *slog.Logger,
+	summary *runSummary,
+) (map[string][]string, map[string]bool) {
+	warnedNoAccount := map[string]bool{}
+	desiredByRole := map[string][]string{}
+	for _, role := range roles {
+		seen := map[string]bool{}
+		for _, holder := range scan.holders[role.ID] {
+			account, found := accounts[normalizeEmail(holder.Email)]
+			if !found {
+				if !warnedNoAccount[holder.ID] {
+					warnedNoAccount[holder.ID] = true
+					summary.skippedUsers++
+					logger.Warn("skipping Keycloak user",
+						"reason", "no Outline Account",
+						"username", holder.Username,
+						"email", holder.Email,
+					)
+				}
+				continue
+			}
+			if !seen[account.ID] {
+				seen[account.ID] = true
+				desiredByRole[role.ID] = append(desiredByRole[role.ID], account.ID)
+			}
+		}
+	}
+
+	protectedAccounts := map[string]bool{}
+	for _, account := range accounts {
+		if scan.ambiguousEmails[normalizeEmail(account.Email)] {
+			protectedAccounts[account.ID] = true
+		}
+	}
+	return desiredByRole, protectedAccounts
+}
+
 func readMemberships(ctx context.Context, outline *outlineClient, actions []groupAction) (map[string][]string, error) {
 	memberships := map[string][]string{}
 	for _, action := range actions {
@@ -186,34 +240,14 @@ func readMemberships(ctx context.Context, outline *outlineClient, actions []grou
 	return memberships, nil
 }
 
-func findOrphanedGroups(groups []outlineGroup, roles []clientRole, externalIDPrefix string) []outlineGroup {
-	roleIDs := map[string]bool{}
-	for _, role := range roles {
-		roleIDs[role.ID] = true
-	}
-
-	var orphaned []outlineGroup
-	for _, group := range groups {
-		if !strings.HasPrefix(group.ExternalID, externalIDPrefix) {
-			continue
-		}
-		if roleIDs[strings.TrimPrefix(group.ExternalID, externalIDPrefix)] {
-			continue
-		}
-		orphaned = append(orphaned, group)
-	}
-	return orphaned
-}
-
 func applyPlan(
 	ctx context.Context,
 	outline *outlineClient,
 	actions []groupAction,
 	roles []clientRole,
 	memberships map[string][]string,
-	roleHolders map[string][]keycloakUser,
-	accounts map[string]outlineUser,
-	logger *slog.Logger,
+	desiredByRole map[string][]string,
+	protectedAccounts map[string]bool,
 	summary *runSummary,
 ) []error {
 	var failures []error
@@ -223,19 +257,20 @@ func applyPlan(
 		group, err := applyGroupAction(ctx, outline, action, summary)
 		if err != nil {
 			failures = append(failures, err)
-			continue
+			if action.kind == groupActionCreate {
+				continue
+			}
+			group = outlineGroup{ID: action.groupID, Name: action.name, ExternalID: action.externalID}
 		}
 		groupsByRole[action.roleID] = group
 	}
 
-	warnedNoAccount := map[string]bool{}
 	for _, role := range roles {
 		group, applied := groupsByRole[role.ID]
 		if !applied {
 			continue
 		}
-		desired := desiredMemberIDs(roleHolders[role.ID], accounts, logger, summary, warnedNoAccount)
-		if err := reconcileMembers(ctx, outline, group, memberships[group.ID], desired, summary); err != nil {
+		if err := reconcileMembers(ctx, outline, group, memberships[group.ID], desiredByRole[role.ID], protectedAccounts, summary); err != nil {
 			failures = append(failures, err)
 		}
 	}
@@ -270,43 +305,13 @@ func applyGroupAction(ctx context.Context, outline *outlineClient, action groupA
 	}
 }
 
-func desiredMemberIDs(
-	holders []keycloakUser,
-	accounts map[string]outlineUser,
-	logger *slog.Logger,
-	summary *runSummary,
-	warnedNoAccount map[string]bool,
-) []string {
-	var ids []string
-	seen := map[string]bool{}
-	for _, holder := range holders {
-		account, found := accounts[normalizeEmail(holder.Email)]
-		if !found {
-			if !warnedNoAccount[holder.ID] {
-				warnedNoAccount[holder.ID] = true
-				summary.skippedUsers++
-				logger.Warn("skipping Keycloak user",
-					"reason", "no Outline Account",
-					"username", holder.Username,
-					"email", holder.Email,
-				)
-			}
-			continue
-		}
-		if !seen[account.ID] {
-			seen[account.ID] = true
-			ids = append(ids, account.ID)
-		}
-	}
-	return ids
-}
-
 func reconcileMembers(
 	ctx context.Context,
 	outline *outlineClient,
 	group outlineGroup,
 	current []string,
 	desired []string,
+	protectedAccounts map[string]bool,
 	summary *runSummary,
 ) error {
 	currentMembers := map[string]bool{}
@@ -320,7 +325,7 @@ func reconcileMembers(
 
 	var failures []error
 	for _, userID := range current {
-		if desiredMembers[userID] {
+		if desiredMembers[userID] || protectedAccounts[userID] {
 			continue
 		}
 		if err := outline.removeUserFromGroup(ctx, group.ID, userID); err != nil {

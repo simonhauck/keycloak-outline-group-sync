@@ -189,18 +189,31 @@ func TestServiceBinaryWarnsAboutSkippedUser(t *testing.T) {
 }
 
 func TestServiceBinaryReportsRunSummary(t *testing.T) {
-	kc := newFakeKeycloak(t, []clientRole{{ID: "role-uuid", Name: "Team A"}})
-	kc.seedUsers(keycloakUser{
-		ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
-		DirectRoles: []string{"Team A"},
+	kc := newFakeKeycloak(t, []clientRole{
+		{ID: "role-uuid", Name: "Team A"},
+		{ID: "role-b-uuid", Name: "Team B"},
 	})
+	kc.seedUsers(
+		keycloakUser{
+			ID: "kc-carol", Username: "carol", Email: "carol@example.com", Enabled: false,
+			DirectRoles: []string{"Team A"},
+		},
+		keycloakUser{
+			ID: "kc-dave", Username: "dave", Email: "dave@example.com", Enabled: true,
+			DirectRoles: []string{"Team B"},
+		},
+	)
 	ol := newFakeOutline(t)
 	ol.seedGroups(
 		outlineGroup{ID: "managed-group", Name: "Team A", ExternalID: "keycloak:test:roles-client:role-uuid"},
 		outlineGroup{ID: "orphaned-group", Name: "Old Team", ExternalID: "keycloak:test:roles-client:deleted-role-uuid"},
 	)
-	ol.seedUsers(outlineUser{ID: "outline-bob", Email: "bob@example.com"})
+	ol.seedUsers(
+		outlineUser{ID: "outline-bob", Email: "bob@example.com"},
+		outlineUser{ID: "outline-dave", Email: "dave@example.com"},
+	)
 	ol.seedMembership("managed-group", "outline-bob")
+	ol.seedMembership("orphaned-group", "outline-bob")
 
 	command := exec.Command(serviceBinary, "--once")
 	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
@@ -210,6 +223,10 @@ func TestServiceBinaryReportsRunSummary(t *testing.T) {
 	}
 
 	for _, want := range []string{
+		`"groupsCreated":1`,
+		`"groupsAdopted":0`,
+		`"groupsRenamed":0`,
+		`"membersAdded":1`,
 		`"membersRemoved":1`,
 		`"skippedUsers":1`,
 		`"orphanedGroups":1`,
@@ -220,6 +237,9 @@ func TestServiceBinaryReportsRunSummary(t *testing.T) {
 			t.Fatalf("run summary does not report %s:\n%s", want, output)
 		}
 	}
+	assertMembers(t, ol, "managed-group", nil)
+	assertMembers(t, ol, "created-group-1", []string{"outline-dave"})
+	assertMembers(t, ol, "orphaned-group", []string{"outline-bob"})
 }
 
 func TestServiceBinaryReportsFailedOperation(t *testing.T) {

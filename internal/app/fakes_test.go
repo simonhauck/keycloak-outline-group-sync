@@ -323,6 +323,7 @@ type fakeOutline struct {
 	listGroupsDelay time.Duration
 	failListGroups  int
 	failAddUser     int
+	failUpdateGroup int
 
 	mu          sync.Mutex
 	groups      []outlineGroup
@@ -367,6 +368,12 @@ func (f *fakeOutline) failNextAddUser(count int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failAddUser = count
+}
+
+func (f *fakeOutline) failNextUpdateGroup(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failUpdateGroup = count
 }
 
 func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
@@ -485,6 +492,12 @@ func (f *fakeOutline) handleUpdateGroup(w http.ResponseWriter, recorded recorded
 	id, _ := recorded.JSON["id"].(string)
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failUpdateGroup > 0 {
+		f.failUpdateGroup--
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"ok": false, "error": "Internal Server Error"})
+		return
+	}
 	for i, group := range f.groups {
 		if group.ID != id {
 			continue
