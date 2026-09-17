@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,6 +21,7 @@ type config struct {
 	outlineURL           string
 	outlineToken         string
 	syncInterval         time.Duration
+	dryRun               bool
 	logLevel             slog.Level
 }
 
@@ -107,6 +109,14 @@ func loadConfig() (config, error) {
 			return config{}, fmt.Errorf("invalid SYNC_INTERVAL: %q must be a positive duration", raw)
 		}
 		cfg.syncInterval = interval
+	}
+
+	if raw := os.Getenv("DRY_RUN"); raw != "" {
+		dryRun, err := strconv.ParseBool(raw)
+		if err != nil {
+			return config{}, fmt.Errorf("invalid DRY_RUN: %q must be a boolean", raw)
+		}
+		cfg.dryRun = dryRun
 	}
 
 	cfg.logLevel = slog.LevelInfo
