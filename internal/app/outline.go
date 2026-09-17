@@ -19,6 +19,11 @@ type outlineGroup struct {
 	ExternalID string `json:"externalId"`
 }
 
+type outlineUser struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+}
+
 type outlineClient struct {
 	baseURL string
 	token   string
@@ -65,6 +70,53 @@ func (o *outlineClient) updateGroup(ctx context.Context, id, name, externalID st
 	}
 	_, err := o.call(ctx, "groups.update", map[string]any{"id": id, "name": name, "externalId": externalID}, &data)
 	return data.Group, err
+}
+
+func (o *outlineClient) listUsersByEmails(ctx context.Context, emails []string) ([]outlineUser, error) {
+	var users []outlineUser
+	for start := 0; start < len(emails); start += outlinePageSize {
+		batch := emails[start:min(start+outlinePageSize, len(emails))]
+		for offset := 0; ; {
+			var page []outlineUser
+			_, err := o.call(ctx, "users.list", map[string]any{"emails": batch, "limit": outlinePageSize, "offset": offset}, &page)
+			if err != nil {
+				return nil, err
+			}
+			users = append(users, page...)
+			if len(page) == 0 {
+				break
+			}
+			offset += len(page)
+		}
+	}
+	return users, nil
+}
+
+func (o *outlineClient) groupMemberIDs(ctx context.Context, groupID string) ([]string, error) {
+	var ids []string
+	for offset := 0; ; {
+		var data struct {
+			GroupMemberships []struct {
+				UserID string `json:"userId"`
+			} `json:"groupMemberships"`
+		}
+		_, err := o.call(ctx, "groups.memberships", map[string]any{"id": groupID, "limit": outlinePageSize, "offset": offset}, &data)
+		if err != nil {
+			return nil, err
+		}
+		for _, membership := range data.GroupMemberships {
+			ids = append(ids, membership.UserID)
+		}
+		if len(data.GroupMemberships) == 0 {
+			return ids, nil
+		}
+		offset += len(data.GroupMemberships)
+	}
+}
+
+func (o *outlineClient) addUserToGroup(ctx context.Context, groupID, userID string) error {
+	_, err := o.call(ctx, "groups.add_user", map[string]any{"id": groupID, "userId": userID}, nil)
+	return err
 }
 
 type outlineEnvelope struct {

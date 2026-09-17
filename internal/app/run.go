@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
@@ -19,6 +20,10 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("listing Client Roles of %q: %w", cfg.rolesClientID, err)
 	}
+	users, err := keycloak.users(ctx)
+	if err != nil {
+		return fmt.Errorf("listing users: %w", err)
+	}
 
 	outline := newOutlineClient(cfg.outlineURL, cfg.outlineToken)
 	groups, err := outline.listGroups(ctx)
@@ -26,18 +31,29 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 		return fmt.Errorf("listing Outline Groups: %w", err)
 	}
 
-	actions := planGroupActions(roles, groups, managedExternalIDPrefix(cfg))
 	summary := runSummary{}
-	for _, action := range actions {
-		if err := applyGroupAction(ctx, outline, action, &summary); err != nil {
+	groupsByRole := map[string]outlineGroup{}
+	for _, action := range planGroupActions(roles, groups, managedExternalIDPrefix(cfg)) {
+		group, err := applyGroupAction(ctx, outline, action, &summary)
+		if err != nil {
 			return err
 		}
+		groupsByRole[action.roleID] = group
+	}
+
+	roleHolders, err := findRoleHolders(ctx, keycloak, users, rolesUUID, groupsByRole, logger)
+	if err != nil {
+		return err
+	}
+	if err := addMissingMembers(ctx, outline, roles, groupsByRole, roleHolders, logger, &summary); err != nil {
+		return err
 	}
 
 	logger.Info("sync run complete",
 		"groupsCreated", summary.groupsCreated,
 		"groupsAdopted", summary.groupsAdopted,
 		"groupsRenamed", summary.groupsRenamed,
+		"membersAdded", summary.membersAdded,
 	)
 	return nil
 }
@@ -46,25 +62,166 @@ type runSummary struct {
 	groupsCreated int
 	groupsAdopted int
 	groupsRenamed int
+	membersAdded  int
 }
 
-func applyGroupAction(ctx context.Context, outline *outlineClient, action groupAction, summary *runSummary) error {
+func applyGroupAction(ctx context.Context, outline *outlineClient, action groupAction, summary *runSummary) (outlineGroup, error) {
 	switch action.kind {
 	case groupActionCreate:
-		if _, err := outline.createGroup(ctx, action.name, action.externalID); err != nil {
-			return fmt.Errorf("creating Managed Group %q: %w", action.name, err)
+		group, err := outline.createGroup(ctx, action.name, action.externalID)
+		if err != nil {
+			return outlineGroup{}, fmt.Errorf("creating Managed Group %q: %w", action.name, err)
 		}
 		summary.groupsCreated++
+		return group, nil
 	case groupActionAdopt:
-		if _, err := outline.updateGroup(ctx, action.groupID, action.name, action.externalID); err != nil {
-			return fmt.Errorf("adopting Outline Group as %q: %w", action.name, err)
+		group, err := outline.updateGroup(ctx, action.groupID, action.name, action.externalID)
+		if err != nil {
+			return outlineGroup{}, fmt.Errorf("adopting Outline Group as %q: %w", action.name, err)
 		}
 		summary.groupsAdopted++
+		return group, nil
 	case groupActionRename:
-		if _, err := outline.updateGroup(ctx, action.groupID, action.name, action.externalID); err != nil {
-			return fmt.Errorf("renaming Managed Group to %q: %w", action.name, err)
+		group, err := outline.updateGroup(ctx, action.groupID, action.name, action.externalID)
+		if err != nil {
+			return outlineGroup{}, fmt.Errorf("renaming Managed Group to %q: %w", action.name, err)
 		}
 		summary.groupsRenamed++
+		return group, nil
+	default:
+		return outlineGroup{ID: action.groupID, Name: action.name, ExternalID: action.externalID}, nil
+	}
+}
+
+func findRoleHolders(
+	ctx context.Context,
+	keycloak *keycloakAdmin,
+	users []keycloakUser,
+	rolesUUID string,
+	groupsByRole map[string]outlineGroup,
+	logger *slog.Logger,
+) (map[string][]keycloakUser, error) {
+	var candidates []keycloakUser
+	emailCount := map[string]int{}
+	for _, user := range users {
+		if !user.Enabled {
+			logger.Warn("skipping Keycloak user",
+				"reason", "disabled",
+				"username", user.Username,
+			)
+			continue
+		}
+		if user.Email == "" {
+			logger.Warn("skipping Keycloak user",
+				"reason", "no email",
+				"username", user.Username,
+			)
+			continue
+		}
+		email := normalizeEmail(user.Email)
+		emailCount[email]++
+		candidates = append(candidates, user)
+	}
+
+	holders := map[string][]keycloakUser{}
+	for _, user := range candidates {
+		email := normalizeEmail(user.Email)
+		if emailCount[email] > 1 {
+			logger.Warn("skipping Keycloak user",
+				"reason", "duplicate email",
+				"username", user.Username,
+				"email", user.Email,
+			)
+			continue
+		}
+		mappings, err := keycloak.effectiveClientRoles(ctx, user.ID, rolesUUID)
+		if err != nil {
+			return nil, fmt.Errorf("reading Client Roles of user %q: %w", user.Username, err)
+		}
+		for _, role := range mappings {
+			if _, managed := groupsByRole[role.ID]; managed {
+				holders[role.ID] = append(holders[role.ID], user)
+			}
+		}
+	}
+	return holders, nil
+}
+
+func addMissingMembers(
+	ctx context.Context,
+	outline *outlineClient,
+	roles []clientRole,
+	groupsByRole map[string]outlineGroup,
+	roleHolders map[string][]keycloakUser,
+	logger *slog.Logger,
+	summary *runSummary,
+) error {
+	var accounts []outlineUser
+	if emails := holderEmails(roles, roleHolders); len(emails) > 0 {
+		var err error
+		accounts, err = outline.listUsersByEmails(ctx, emails)
+		if err != nil {
+			return fmt.Errorf("resolving Outline Accounts: %w", err)
+		}
+	}
+	accountByEmail := map[string]outlineUser{}
+	for _, account := range accounts {
+		accountByEmail[normalizeEmail(account.Email)] = account
+	}
+	warnedNoAccount := map[string]bool{}
+
+	for _, role := range roles {
+		group := groupsByRole[role.ID]
+		memberIDs, err := outline.groupMemberIDs(ctx, group.ID)
+		if err != nil {
+			return fmt.Errorf("listing members of Outline Group %q: %w", group.Name, err)
+		}
+		members := map[string]bool{}
+		for _, memberID := range memberIDs {
+			members[memberID] = true
+		}
+
+		for _, holder := range roleHolders[role.ID] {
+			account, found := accountByEmail[normalizeEmail(holder.Email)]
+			if !found {
+				if !warnedNoAccount[holder.ID] {
+					warnedNoAccount[holder.ID] = true
+					logger.Warn("skipping Keycloak user",
+						"reason", "no Outline Account",
+						"username", holder.Username,
+						"email", holder.Email,
+					)
+				}
+				continue
+			}
+			if members[account.ID] {
+				continue
+			}
+			if err := outline.addUserToGroup(ctx, group.ID, account.ID); err != nil {
+				return fmt.Errorf("adding %q to Outline Group %q: %w", holder.Email, group.Name, err)
+			}
+			members[account.ID] = true
+			summary.membersAdded++
+		}
 	}
 	return nil
+}
+
+func holderEmails(roles []clientRole, roleHolders map[string][]keycloakUser) []string {
+	var emails []string
+	seen := map[string]bool{}
+	for _, role := range roles {
+		for _, holder := range roleHolders[role.ID] {
+			email := normalizeEmail(holder.Email)
+			if !seen[email] {
+				seen[email] = true
+				emails = append(emails, email)
+			}
+		}
+	}
+	return emails
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(email)
 }
