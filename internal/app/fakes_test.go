@@ -485,7 +485,7 @@ func (f *fakeOutline) handleCreateGroup(w http.ResponseWriter, recorded recorded
 	group := outlineGroup{ID: fmt.Sprintf("created-group-%d", f.counter), Name: name, ExternalID: externalID}
 	f.groups = append(f.groups, group)
 	f.mu.Unlock()
-	writeJSON(w, map[string]any{"ok": true, "data": map[string]any{"group": presentGroup(group)}})
+	writeJSON(w, map[string]any{"ok": true, "data": presentGroup(group)})
 }
 
 func (f *fakeOutline) handleUpdateGroup(w http.ResponseWriter, recorded recordedRequest) {
@@ -509,7 +509,7 @@ func (f *fakeOutline) handleUpdateGroup(w http.ResponseWriter, recorded recorded
 			group.ExternalID = externalID
 		}
 		f.groups[i] = group
-		writeJSON(w, map[string]any{"ok": true, "data": map[string]any{"group": presentGroup(group)}})
+		writeJSON(w, map[string]any{"ok": true, "data": presentGroup(group)})
 		return
 	}
 	w.WriteHeader(http.StatusNotFound)

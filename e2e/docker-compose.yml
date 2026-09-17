@@ -1,0 +1,98 @@
+name: keycloak-outline-group-sync-e2e
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.7.3
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "{ printf 'HEAD /health/ready HTTP/1.0\r\n\r\n' >&0; grep 'HTTP/1.0 200'; } 0<>/dev/tcp/localhost/9000"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  provisioner:
+    image: quay.io/keycloak/keycloak:26.7.3
+    depends_on:
+      keycloak:
+        condition: service_healthy
+    entrypoint: ["bash", "/provision.sh"]
+    volumes:
+      - ./provision.sh:/provision.sh:ro
+    restart: "no"
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: outline
+      POSTGRES_PASSWORD: outline
+      POSTGRES_DB: outline
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U outline -d outline"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  outline:
+    image: outlinewiki/outline:1.10.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      provisioner:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      URL: http://localhost:13000
+      FORCE_HTTPS: "false"
+      SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      UTILS_SECRET: e2e-utils-secret
+      DATABASE_URL: postgres://outline:outline@postgres:5432/outline
+      PGSSLMODE: disable
+      REDIS_URL: redis://redis:6379
+      OIDC_CLIENT_ID: outline
+      OIDC_CLIENT_SECRET: outline-secret
+      OIDC_ISSUER_URL: http://keycloak:8080/realms/e2e
+      OIDC_DISPLAY_NAME: Keycloak
+      OIDC_USERNAME_CLAIM: preferred_username
+      OIDC_SCOPES: openid profile email
+      OIDC_DISABLE_REDIRECT: "true"
+    ports:
+      - "127.0.0.1:13000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/_health"]
+      interval: 2s
+      timeout: 3s
+      retries: 90
+      start_period: 5s
+
+  sync:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: e2e
+      KEYCLOAK_CLIENT_ID: sync-client
+      KEYCLOAK_CLIENT_SECRET: sync-secret
+      KEYCLOAK_ROLES_CLIENT_ID: roles-client
+      OUTLINE_URL: http://outline:3000
+      OUTLINE_TOKEN: unset
+      SYNC_INTERVAL: 5m
+      LOG_LEVEL: info

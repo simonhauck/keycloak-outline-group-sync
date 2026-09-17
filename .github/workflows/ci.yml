@@ -27,3 +27,20 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race -count=1 ./...
+
+  e2e:
+    name: E2E with real Keycloak and Outline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v5
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+      - name: Vet e2e suite
+        run: go vet -tags e2e ./e2e/
+      - name: E2E
+        run: go test -tags e2e -count=1 -v -timeout 15m ./e2e/

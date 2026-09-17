@@ -57,19 +57,15 @@ func (o *outlineClient) listGroups(ctx context.Context) ([]outlineGroup, error) 
 }
 
 func (o *outlineClient) createGroup(ctx context.Context, name, externalID string) (outlineGroup, error) {
-	var data struct {
-		Group outlineGroup `json:"group"`
-	}
-	_, err := o.call(ctx, "groups.create", map[string]any{"name": name, "externalId": externalID}, &data)
-	return data.Group, err
+	var group outlineGroup
+	_, err := o.call(ctx, "groups.create", map[string]any{"name": name, "externalId": externalID}, &group)
+	return group, err
 }
 
 func (o *outlineClient) updateGroup(ctx context.Context, id, name, externalID string) (outlineGroup, error) {
-	var data struct {
-		Group outlineGroup `json:"group"`
-	}
-	_, err := o.call(ctx, "groups.update", map[string]any{"id": id, "name": name, "externalId": externalID}, &data)
-	return data.Group, err
+	var group outlineGroup
+	_, err := o.call(ctx, "groups.update", map[string]any{"id": id, "name": name, "externalId": externalID}, &group)
+	return group, err
 }
 
 func (o *outlineClient) listUsersByEmails(ctx context.Context, emails []string) ([]outlineUser, error) {
