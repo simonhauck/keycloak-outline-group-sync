@@ -25,7 +25,7 @@ type clientRole struct {
 	Name string `json:"name"`
 }
 
-type clientUser struct {
+type keycloakUser struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
 	Email    string `json:"email"`
@@ -94,8 +94,7 @@ func (c *keycloakAdmin) clientUUID(ctx context.Context, clientID string) (string
 }
 
 func (c *keycloakAdmin) clientRoles(ctx context.Context, clientUUID string) ([]clientRole, error) {
-	var roles []clientRole
-	for first := 0; ; {
+	return listAllPages(func(first int) ([]clientRole, error) {
 		endpoint := fmt.Sprintf("%s/admin/realms/%s/clients/%s/roles?first=%d&max=%d",
 			c.baseURL, url.PathEscape(c.realm), url.PathEscape(clientUUID), first, keycloakPageSize)
 		body, status, err := c.do(ctx, http.MethodGet, endpoint, nil, "")
@@ -110,17 +109,12 @@ func (c *keycloakAdmin) clientRoles(ctx context.Context, clientUUID string) ([]c
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, fmt.Errorf("decoding role listing response: %w", err)
 		}
-		roles = append(roles, page...)
-		if len(page) == 0 {
-			return roles, nil
-		}
-		first += len(page)
-	}
+		return page, nil
+	})
 }
 
-func (c *keycloakAdmin) users(ctx context.Context) ([]clientUser, error) {
-	var users []clientUser
-	for first := 0; ; {
+func (c *keycloakAdmin) users(ctx context.Context) ([]keycloakUser, error) {
+	return listAllPages(func(first int) ([]keycloakUser, error) {
 		endpoint := fmt.Sprintf("%s/admin/realms/%s/users?first=%d&max=%d",
 			c.baseURL, url.PathEscape(c.realm), first, keycloakPageSize)
 		body, status, err := c.do(ctx, http.MethodGet, endpoint, nil, "")
@@ -131,13 +125,24 @@ func (c *keycloakAdmin) users(ctx context.Context) ([]clientUser, error) {
 			return nil, fmt.Errorf("user listing returned status %d: %s", status, strings.TrimSpace(string(body)))
 		}
 
-		var page []clientUser
+		var page []keycloakUser
 		if err := json.Unmarshal(body, &page); err != nil {
 			return nil, fmt.Errorf("decoding user listing response: %w", err)
 		}
-		users = append(users, page...)
+		return page, nil
+	})
+}
+
+func listAllPages[T any](fetch func(first int) ([]T, error)) ([]T, error) {
+	var all []T
+	for first := 0; ; {
+		page, err := fetch(first)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
 		if len(page) == 0 {
-			return users, nil
+			return all, nil
 		}
 		first += len(page)
 	}

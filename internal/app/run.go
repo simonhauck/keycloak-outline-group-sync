@@ -32,20 +32,20 @@ func runSync(ctx context.Context, cfg config, logger *slog.Logger) error {
 	}
 
 	summary := runSummary{}
-	roleGroups := map[string]outlineGroup{}
+	groupsByRole := map[string]outlineGroup{}
 	for _, action := range planGroupActions(roles, groups, managedExternalIDPrefix(cfg)) {
 		group, err := applyGroupAction(ctx, outline, action, &summary)
 		if err != nil {
 			return err
 		}
-		roleGroups[action.roleID] = group
+		groupsByRole[action.roleID] = group
 	}
 
-	roleHolders, err := findRoleHolders(ctx, keycloak, users, rolesUUID, roleGroups, logger)
+	roleHolders, err := findRoleHolders(ctx, keycloak, users, rolesUUID, groupsByRole, logger)
 	if err != nil {
 		return err
 	}
-	if err := addMissingMembers(ctx, outline, roles, roleGroups, roleHolders, logger, &summary); err != nil {
+	if err := addMissingMembers(ctx, outline, roles, groupsByRole, roleHolders, logger, &summary); err != nil {
 		return err
 	}
 
@@ -96,12 +96,12 @@ func applyGroupAction(ctx context.Context, outline *outlineClient, action groupA
 func findRoleHolders(
 	ctx context.Context,
 	keycloak *keycloakAdmin,
-	users []clientUser,
+	users []keycloakUser,
 	rolesUUID string,
-	managedRoles map[string]outlineGroup,
+	groupsByRole map[string]outlineGroup,
 	logger *slog.Logger,
-) (map[string][]clientUser, error) {
-	var candidates []clientUser
+) (map[string][]keycloakUser, error) {
+	var candidates []keycloakUser
 	emailCount := map[string]int{}
 	for _, user := range users {
 		if !user.Enabled {
@@ -118,14 +118,14 @@ func findRoleHolders(
 			)
 			continue
 		}
-		email := strings.ToLower(user.Email)
+		email := normalizeEmail(user.Email)
 		emailCount[email]++
 		candidates = append(candidates, user)
 	}
 
-	holders := map[string][]clientUser{}
+	holders := map[string][]keycloakUser{}
 	for _, user := range candidates {
-		email := strings.ToLower(user.Email)
+		email := normalizeEmail(user.Email)
 		if emailCount[email] > 1 {
 			logger.Warn("skipping Keycloak user",
 				"reason", "duplicate email",
@@ -139,7 +139,7 @@ func findRoleHolders(
 			return nil, fmt.Errorf("reading Client Roles of user %q: %w", user.Username, err)
 		}
 		for _, role := range mappings {
-			if _, managed := managedRoles[role.ID]; managed {
+			if _, managed := groupsByRole[role.ID]; managed {
 				holders[role.ID] = append(holders[role.ID], user)
 			}
 		}
@@ -151,8 +151,8 @@ func addMissingMembers(
 	ctx context.Context,
 	outline *outlineClient,
 	roles []clientRole,
-	roleGroups map[string]outlineGroup,
-	roleHolders map[string][]clientUser,
+	groupsByRole map[string]outlineGroup,
+	roleHolders map[string][]keycloakUser,
 	logger *slog.Logger,
 	summary *runSummary,
 ) error {
@@ -166,11 +166,12 @@ func addMissingMembers(
 	}
 	accountByEmail := map[string]outlineUser{}
 	for _, account := range accounts {
-		accountByEmail[strings.ToLower(account.Email)] = account
+		accountByEmail[normalizeEmail(account.Email)] = account
 	}
+	warnedNoAccount := map[string]bool{}
 
 	for _, role := range roles {
-		group := roleGroups[role.ID]
+		group := groupsByRole[role.ID]
 		memberIDs, err := outline.groupMemberIDs(ctx, group.ID)
 		if err != nil {
 			return fmt.Errorf("listing members of Outline Group %q: %w", group.Name, err)
@@ -181,13 +182,16 @@ func addMissingMembers(
 		}
 
 		for _, holder := range roleHolders[role.ID] {
-			account, found := accountByEmail[strings.ToLower(holder.Email)]
+			account, found := accountByEmail[normalizeEmail(holder.Email)]
 			if !found {
-				logger.Warn("skipping Keycloak user",
-					"reason", "no Outline Account",
-					"username", holder.Username,
-					"email", holder.Email,
-				)
+				if !warnedNoAccount[holder.ID] {
+					warnedNoAccount[holder.ID] = true
+					logger.Warn("skipping Keycloak user",
+						"reason", "no Outline Account",
+						"username", holder.Username,
+						"email", holder.Email,
+					)
+				}
 				continue
 			}
 			if members[account.ID] {
@@ -203,12 +207,12 @@ func addMissingMembers(
 	return nil
 }
 
-func holderEmails(roles []clientRole, roleHolders map[string][]clientUser) []string {
+func holderEmails(roles []clientRole, roleHolders map[string][]keycloakUser) []string {
 	var emails []string
 	seen := map[string]bool{}
 	for _, role := range roles {
 		for _, holder := range roleHolders[role.ID] {
-			email := strings.ToLower(holder.Email)
+			email := normalizeEmail(holder.Email)
 			if !seen[email] {
 				seen[email] = true
 				emails = append(emails, email)
@@ -216,4 +220,8 @@ func holderEmails(roles []clientRole, roleHolders map[string][]clientUser) []str
 		}
 	}
 	return emails
+}
+
+func normalizeEmail(email string) string {
+	return strings.ToLower(email)
 }

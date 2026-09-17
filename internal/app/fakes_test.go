@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -230,7 +231,7 @@ func (f *fakeKeycloak) userHasRole(user keycloakUser, roleName string) bool {
 		}
 	}
 	for _, group := range f.groups {
-		if !contains(group.Members, user.ID) {
+		if !slices.Contains(group.Members, user.ID) {
 			continue
 		}
 		for id := group.ID; id != ""; {
@@ -238,7 +239,7 @@ func (f *fakeKeycloak) userHasRole(user keycloakUser, roleName string) bool {
 			if !found {
 				break
 			}
-			if contains(current.Roles, roleName) {
+			if slices.Contains(current.Roles, roleName) {
 				return true
 			}
 			id = current.ParentID
@@ -263,15 +264,6 @@ func (f *fakeKeycloak) groupByID(id string) (keycloakGroup, bool) {
 		}
 	}
 	return keycloakGroup{}, false
-}
-
-func contains(values []string, wanted string) bool {
-	for _, value := range values {
-		if value == wanted {
-			return true
-		}
-	}
-	return false
 }
 
 func (f *fakeKeycloak) authorized(w http.ResponseWriter, recorded recordedRequest) bool {
@@ -527,7 +519,7 @@ func (f *fakeOutline) handleAddUser(w http.ResponseWriter, recorded recordedRequ
 		writeJSON(w, map[string]any{"ok": false, "error": "user not found"})
 		return
 	}
-	if !contains(f.memberships[groupID], userID) {
+	if !slices.Contains(f.memberships[groupID], userID) {
 		f.memberships[groupID] = append(f.memberships[groupID], userID)
 	}
 	writeJSON(w, map[string]any{
@@ -598,14 +590,14 @@ func (f *fakeOutline) userRecord(id string) (outlineUser, bool) {
 	return outlineUser{}, false
 }
 
-func listWindow(recorded recordedRequest, cap int) (limit, offset int) {
+func listWindow(recorded recordedRequest, pageCap int) (limit, offset int) {
 	limit = intValue(recorded.JSON["limit"], 15)
 	offset = intValue(recorded.JSON["offset"], 0)
 	if limit <= 0 {
 		limit = 15
 	}
-	if cap > 0 && limit > cap {
-		limit = cap
+	if pageCap > 0 && limit > pageCap {
+		limit = pageCap
 	}
 	return limit, offset
 }
