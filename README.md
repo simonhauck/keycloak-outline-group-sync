@@ -1,16 +1,17 @@
 # Keycloak → Outline Group Sync
 
-A small self-hosted service that keeps [Outline](https://www.getoutline.com) group membership in sync with [Keycloak](https://www.keycloak.org), so access to Outline collections is granted through Keycloak and never maintained twice.
+A small self-hosted Sync Service that keeps [Outline](https://www.getoutline.com) group membership in sync with [Keycloak](https://www.keycloak.org), so access to Outline collections is granted through Keycloak and never maintained twice.
 
-Every **Client Role** on one configured Keycloak client maps one-to-one to an **Outline Group**, and the group's membership is mirrored exactly from the role's holders. Granting access is a pure Keycloak operation; revoking it is too.
+Every **Client Role** on one configured Keycloak client maps one-to-one to an **Outline Group**, and the group's membership is a **Full State Sync** of the role's holders. Granting access is a pure Keycloak operation; revoking it is too.
 
 ## How it works
 
-- The service polls Keycloak on a schedule and reads every Client Role of the configured client, plus each user's effective client role mappings — direct assignments and roles inherited through Keycloak Groups and their ancestors.
-- Each role maps to an Outline Group named exactly after the role, tagged with a stable external id: `keycloak:<realm>:<roles-client-id>:<role-uuid>`. Roles with no holders still get their group.
-- Existing unmanaged groups whose name matches a role are adopted (and tagged) rather than duplicated, so you can migrate without recreating access grants.
+- The Sync Service polls Keycloak on a schedule and reads every Client Role of the configured client, plus each user's effective client role mappings — direct assignments and roles inherited through Keycloak Groups and their ancestors.
+- Each Client Role maps to an Outline Group named exactly after the role, tagged with a stable external id: `keycloak:<realm>:<roles-client-id>:<role-uuid>`. Roles with no holders still get their group.
+- An existing unmanaged group whose name matches a Client Role is adopted (and tagged) rather than duplicated, so you can migrate without recreating access grants. Groups that already carry an external id from another tool are left alone and a new Managed Group is created. Adoption starts reconciling membership immediately, so pre-existing extra members are removed on that first run.
 - Role Holders are matched to existing Outline Accounts by lowercased exact email; missing members are added and extra members are removed.
-- A run reads the complete state from Keycloak before writing anything. If any Keycloak read fails, the run aborts before touching Outline.
+- An Outline Account whose email is shared by several enabled Keycloak users is never modified — neither added nor removed — because the service cannot know which user owns it.
+- A run reads the complete state from Keycloak before writing anything. If any read fails, in Keycloak or in Outline, the run aborts before touching Outline.
 - Transient failures and Outline rate limits are handled by the next Sync Run; runs are idempotent, so an initial sync of a large client may take a few intervals. See [ADR-0005](docs/adr/0005-next-run-is-the-retry.md).
 
 ## Guarantees and boundaries
@@ -21,11 +22,14 @@ Every **Client Role** on one configured Keycloak client maps one-to-one to an **
 - **Orphaned Managed Groups are preserved.** If a Client Role is deleted, its group, members and access grants stay as they are and the group is reported as orphaned on each run.
 - **No writes to Keycloak.** The sync is one-way.
 - **Users arrive through SSO.** A Role Holder gains Outline Group membership only after their first SSO login creates their Outline Account plus one Sync Run.
-- **Disabled users are excluded,** so deactivated accounts lose Outline access on the next run.
+- **Disabled users are excluded,** so a user disabled in Keycloak is removed from their Managed Groups on the next run.
+- **Ambiguous users are left alone.** When several Keycloak users share an email, the Outline Account behind it is neither added nor removed.
 
 The full vocabulary and the decisions behind these rules live in [CONTEXT.md](CONTEXT.md) and [`docs/adr/`](docs/adr).
 
 ## Quick start
+
+Prerequisites: Docker with Compose v2. The service is tested against Keycloak 26.x and Outline 1.10 (the versions pinned by the e2e suite).
 
 1. Create the Client Roles, Keycloak Groups and the sync service account ([Keycloak setup](#keycloak-setup)).
 2. Create an Outline API key as a team admin ([Outline setup](#outline-setup)).
@@ -85,14 +89,15 @@ On the service account's **Service account roles**, assign these roles from the 
 
 ## Outline setup
 
-The service authenticates with an Outline API key, created while logged in as a **team admin**:
+The service authenticates with an Outline API key. Create one while logged in as a **team admin**:
 
-1. Log in to Outline (for example through Keycloak SSO — API keys are bearer tokens and do not depend on how the key's owner logs in).
+1. Log in to Outline. On a fresh SSO-only instance, complete one SSO login first: Outline creates the team and makes that first user a team admin. If you bootstrapped the instance with `installation.create`, logging in through SSO with the admin's email claims that existing admin account instead of creating a new one.
 2. Open **Settings → API Tokens**, create a token and copy it into `OUTLINE_TOKEN`.
 
 Notes:
 
-- The key must belong to a team admin, otherwise Outline masks user emails and the service cannot match Role Holders to accounts.
+- API keys are bearer tokens and do not depend on how their owner logs in, so this works with an SSO-only Outline.
+- The key must be able to read user emails, which is how Role Holders are matched to accounts. Team admins always can; with Outline's default email visibility, members can too. If emails come back masked, the affected users are skipped with a warning.
 - The service never creates accounts. Users must have logged in to Outline through SSO at least once before a Sync Run can add them to a group.
 - Roll out with `DRY_RUN=true` first: with writes enabled the service starts converging immediately.
 
@@ -118,20 +123,20 @@ Missing or invalid settings fail fast at startup with an error naming the settin
 ## Running modes
 
 - **Long-running (default):** a Sync Run at startup, then one every `SYNC_INTERVAL`. Runs never overlap; a failed run is logged and the next run retries. `SIGTERM` cancels cleanly.
-- **`--once`:** a single Sync Run for job schedulers. Exit code reflects the run's outcome.
+- **`--once`:** a single Sync Run for external schedulers. It exits non-zero when the run failed — invalid configuration, a failed read, or any failed operation — and zero otherwise.
 
 ## Dry run and rollback
 
 Start with `DRY_RUN=true` and review the logged plan — every intended group create, adoption and rename and every member addition and removal, with a summary. Runs in dry-run mode write nothing.
 
-To roll back: stop the container. The service only manages membership and never deletes groups, so the last applied state stays as it is. To undo a membership change, adjust Keycloak and run again, or edit the group in Outline — but remember that Managed Groups are reconciled on every run, so manual edits are temporary.
+To roll back: stop the container. The Sync Service never deletes groups and never manages accounts or permissions, so the last applied state stays in place. To undo a membership change, adjust Keycloak and run again, or edit the group in Outline — but remember that Managed Groups are reconciled on every run, so manual edits are temporary.
 
 ## Troubleshooting
 
 - **A user is not added.** Look for a `skipping Keycloak user` warning: the user may be disabled, have no email, share an email with another user, or have no Outline Account yet (they need one SSO login first).
 - **An orphaned group warning.** The Client Role behind that group no longer exists. The group and its access grants are left untouched; delete the role only if you intend that, or recreate it to resume syncing.
 - **The first sync takes several runs.** Outline rate-limits its API (by default 1000 requests/60s; `groups.create` at 10/min). Each run makes as much progress as it can and the next one continues. Self-hosters with a very large first sync can raise Outline's `RATE_LIMITER_MULTIPLIER` or `RATE_LIMITER_REQUESTS`.
-- **No writes happen at all.** A Keycloak read failed; the run aborted before touching Outline and the error is in the logs.
+- **No writes happen at all.** A read failed — in Keycloak or in Outline — so the run aborted before writing anything. The error is in the logs.
 
 ## Development
 
@@ -158,7 +163,7 @@ See [`e2e/README.md`](e2e/README.md) for requirements and details.
 
 Releases are automated with [release-please](https://github.com/googleapis/release-please) from conventional squash-merge commit messages, so PR titles must be conventional (a CI check enforces it). Merging the release PR tags `vX.Y.Z`, updates [`CHANGELOG.md`](CHANGELOG.md) and publishes the image to GHCR tagged `X.Y.Z`, `X.Y` and `latest` (`latest` only for stable releases).
 
-Research notes behind the API integrations live in [`docs/research/`](docs/research).
+Research notes behind the API usage live in [`docs/research/`](docs/research).
 
 ## License
 
