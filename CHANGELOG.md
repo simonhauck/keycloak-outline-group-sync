@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/simonhauck/keycloak-outline-group-sync/compare/v0.1.0...v0.2.0) (2026-10-13)
+
+
+### Features
+
+* sync Outline team roles from Keycloak Role Signals ([#28](https://github.com/simonhauck/keycloak-outline-group-sync/issues/28)) ([a9ad3f9](https://github.com/simonhauck/keycloak-outline-group-sync/commit/a9ad3f94fc4b056154c1dd4b03eb6750e096ebae))
+
 ## 0.1.0 (2026-09-19)
 
 
