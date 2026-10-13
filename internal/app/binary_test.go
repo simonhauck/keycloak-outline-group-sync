@@ -263,6 +263,61 @@ func TestServiceBinaryReportsFailedOperation(t *testing.T) {
 	}
 }
 
+func TestServiceBinaryWarnsWhenNoRoleSignalsConfigured(t *testing.T) {
+	kc := newFakeKeycloak(t, nil)
+	kc.seedUsers(keycloakUser{
+		ID: "kc-alice", Username: "alice", Email: "alice@example.com", Enabled: true,
+	})
+	ol := newFakeOutline(t)
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com", Role: "member"})
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(serviceEnv(kc, ol), "LOG_LEVEL=info")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("service exited with error: %v\n%s", err, output)
+	}
+
+	for _, want := range []string{"no Role Signals configured", `"teamRolesChanged":1`} {
+		if !strings.Contains(string(output), want) {
+			t.Fatalf("output does not contain %s:\n%s", want, output)
+		}
+	}
+	if got := ol.userRole("outline-alice"); got != "viewer" {
+		t.Fatalf("alice's Team Role = %q, want the fallback viewer", got)
+	}
+}
+
+func TestServiceBinaryReportsGroupOfRoleSignalAsOrphaned(t *testing.T) {
+	kc := newFakeKeycloak(t, []clientRole{{ID: "role-signal-uuid", Name: "outline-admin"}})
+	ol := newFakeOutline(t)
+	ol.seedGroups(outlineGroup{
+		ID: "former-group", Name: "outline-admin",
+		ExternalID: "keycloak:test:roles-client:role-signal-uuid",
+	})
+	ol.seedUsers(outlineUser{ID: "outline-alice", Email: "alice@example.com"})
+	ol.seedMembership("former-group", "outline-alice")
+
+	command := exec.Command(serviceBinary, "--once")
+	command.Env = envWith(envWith(serviceEnv(kc, ol), "LOG_LEVEL=warn"), "TEAM_ROLE_ADMIN=outline-admin")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("service exited with error: %v\n%s", err, output)
+	}
+
+	if !strings.Contains(string(output), "orphaned Managed Group") {
+		t.Fatalf("output does not report the former role's group as orphaned:\n%s", output)
+	}
+	assertGroups(t, ol, []outlineGroup{{
+		ID: "former-group", Name: "outline-admin",
+		ExternalID: "keycloak:test:roles-client:role-signal-uuid",
+	}})
+	assertMembers(t, ol, "former-group", []string{"outline-alice"})
+	if writes := ol.writeRequests(); len(writes) != 0 {
+		t.Fatalf("a Managed Group whose role became a Role Signal must not be written to, got: %+v", writes)
+	}
+}
+
 func TestServiceBinaryDryRunReportsPlanWithoutWrites(t *testing.T) {
 	kc := newFakeKeycloak(t, []clientRole{
 		{ID: "role-a-uuid", Name: "Team A"},

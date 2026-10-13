@@ -15,6 +15,13 @@ services:
       KEYCLOAK_CLIENT_SECRET: change-me
       # Client whose Client Roles map to Outline Groups. Defaults to KEYCLOAK_CLIENT_ID.
       KEYCLOAK_ROLES_CLIENT_ID: my-outline-client
+      # Optional Role Signals: Client Roles that set an Outline Team Role instead of a group.
+      # TEAM_ROLE_ADMIN: outline-admin
+      # TEAM_ROLE_MEMBER: outline-member
+      # TEAM_ROLE_VIEWER: outline-viewer
+      # TEAM_ROLE_GUEST: outline-guest
+      # Team Role for Managed Accounts without a Role Signal: guest, viewer or member (default viewer).
+      # TEAM_ROLE_FALLBACK: viewer
       # Outline instance and an API key created by a team admin.
       OUTLINE_URL: https://outline.example.com
       OUTLINE_TOKEN: change-me

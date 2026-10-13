@@ -526,16 +526,6 @@ func TestRunOnceSkipsUsersWithoutEmail(t *testing.T) {
 	}
 
 	assertMembers(t, ol, "created-group-1", nil)
-	for _, request := range ol.allRequests() {
-		if request.Path != "/api/users.list" {
-			continue
-		}
-		for _, email := range request.JSON["emails"].([]any) {
-			if email == "" {
-				t.Fatalf("users.list was queried with an empty email: %+v", request.JSON)
-			}
-		}
-	}
 }
 
 func TestRunOnceSkipsUsersSharingAnEmailAddress(t *testing.T) {

@@ -316,6 +316,7 @@ type outlineGroup struct {
 type outlineUser struct {
 	ID    string
 	Email string
+	Role  string
 }
 
 type fakeOutline struct {
@@ -324,10 +325,12 @@ type fakeOutline struct {
 	failListGroups  int
 	failAddUser     int
 	failUpdateGroup int
+	failUpdateRole  int
 
 	mu          sync.Mutex
 	groups      []outlineGroup
 	users       []outlineUser
+	tokenOwner  outlineUser
 	memberships map[string][]string
 	counter     int
 	requests    []recordedRequest
@@ -338,7 +341,10 @@ type fakeOutline struct {
 
 func newFakeOutline(t *testing.T) *fakeOutline {
 	t.Helper()
-	f := &fakeOutline{memberships: map[string][]string{}}
+	f := &fakeOutline{
+		tokenOwner:  outlineUser{ID: "outline-token-owner", Email: "token-owner@example.com", Role: "admin"},
+		memberships: map[string][]string{},
+	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.handle))
 	t.Cleanup(f.server.Close)
 	return f
@@ -355,7 +361,21 @@ func (f *fakeOutline) seedGroups(groups ...outlineGroup) {
 func (f *fakeOutline) seedUsers(users ...outlineUser) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.users = append(f.users, users...)
+	for _, user := range users {
+		if user.Role == "" {
+			user.Role = "viewer"
+		}
+		f.users = append(f.users, user)
+	}
+}
+
+func (f *fakeOutline) seedTokenOwner(user outlineUser) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if user.Role == "" {
+		user.Role = "admin"
+	}
+	f.tokenOwner = user
 }
 
 func (f *fakeOutline) seedMembership(groupID string, userIDs ...string) {
@@ -374,6 +394,12 @@ func (f *fakeOutline) failNextUpdateGroup(count int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failUpdateGroup = count
+}
+
+func (f *fakeOutline) failNextUpdateRole(count int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failUpdateRole = count
 }
 
 func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
@@ -408,6 +434,10 @@ func (f *fakeOutline) handle(w http.ResponseWriter, r *http.Request) {
 		f.handleRemoveUser(w, recorded)
 	case "/api/users.list":
 		f.handleListUsers(w, recorded)
+	case "/api/users.update_role":
+		f.handleUpdateRole(w, recorded)
+	case "/api/auth.info":
+		f.handleAuthInfo(w)
 	default:
 		http.NotFound(w, r)
 	}
@@ -629,7 +659,9 @@ func (f *fakeOutline) handleRemoveUser(w http.ResponseWriter, recorded recordedR
 
 func (f *fakeOutline) handleListUsers(w http.ResponseWriter, recorded recordedRequest) {
 	wanted := map[string]bool{}
+	filtered := false
 	if emails, ok := recorded.JSON["emails"].([]any); ok {
+		filtered = true
 		for _, email := range emails {
 			if value, ok := email.(string); ok {
 				wanted[value] = true
@@ -641,7 +673,7 @@ func (f *fakeOutline) handleListUsers(w http.ResponseWriter, recorded recordedRe
 	f.mu.Lock()
 	matched := []outlineUser{}
 	for _, user := range f.users {
-		if wanted[user.Email] {
+		if !filtered || wanted[user.Email] {
 			matched = append(matched, user)
 		}
 	}
@@ -659,6 +691,53 @@ func (f *fakeOutline) handleListUsers(w http.ResponseWriter, recorded recordedRe
 		"ok":         true,
 		"data":       users,
 		"pagination": map[string]int{"limit": limit, "offset": offset, "total": len(matched)},
+	})
+}
+
+func (f *fakeOutline) handleUpdateRole(w http.ResponseWriter, recorded recordedRequest) {
+	id, _ := recorded.JSON["id"].(string)
+	role, _ := recorded.JSON["role"].(string)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failUpdateRole > 0 {
+		f.failUpdateRole--
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]any{"ok": false, "error": "Internal Server Error"})
+		return
+	}
+	user, found := f.userRecord(id)
+	if !found {
+		w.WriteHeader(http.StatusNotFound)
+		writeJSON(w, map[string]any{"ok": false, "error": "user not found"})
+		return
+	}
+	if id == f.tokenOwner.ID {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"ok": false, "error": "You cannot change your own role"})
+		return
+	}
+	if user.Role == role {
+		w.WriteHeader(http.StatusBadRequest)
+		writeJSON(w, map[string]any{"ok": false, "error": "User is already in that role"})
+		return
+	}
+	for i := range f.users {
+		if f.users[i].ID == id {
+			f.users[i].Role = role
+		}
+	}
+	user.Role = role
+	writeJSON(w, map[string]any{"ok": true, "data": presentUser(user)})
+}
+
+func (f *fakeOutline) handleAuthInfo(w http.ResponseWriter) {
+	f.mu.Lock()
+	owner := f.tokenOwner
+	f.mu.Unlock()
+	writeJSON(w, map[string]any{
+		"ok":   true,
+		"data": map[string]any{"user": presentUser(owner)},
 	})
 }
 
@@ -740,11 +819,18 @@ func (f *fakeOutline) writeRequests() []recordedRequest {
 	var writes []recordedRequest
 	for _, request := range f.requests {
 		switch request.Path {
-		case "/api/groups.create", "/api/groups.update", "/api/groups.add_user", "/api/groups.remove_user":
+		case "/api/groups.create", "/api/groups.update", "/api/groups.add_user", "/api/groups.remove_user", "/api/users.update_role":
 			writes = append(writes, request)
 		}
 	}
 	return writes
+}
+
+func (f *fakeOutline) userRole(id string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	user, _ := f.userRecord(id)
+	return user.Role
 }
 
 func presentGroup(group outlineGroup) map[string]any {
@@ -761,6 +847,7 @@ func presentUser(user outlineUser) map[string]any {
 		"id":    user.ID,
 		"name":  user.ID,
 		"email": user.Email,
+		"role":  user.Role,
 	}
 }
 

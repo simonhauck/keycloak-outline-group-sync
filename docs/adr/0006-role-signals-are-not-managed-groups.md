@@ -1,0 +1,3 @@
+# Role Signals are excluded from Managed Groups
+
+Client Roles named in the `TEAM_ROLE_*` environment variables are Role Signals: they compute Team Roles instead of mapping to Managed Groups. This is a deliberate exception to ADR-0003's "every Client Role is a Managed Group" rule. The signals were pinned to the existing roles client so a signal can be granted through Keycloak Groups with the same read path as group roles, rather than introducing a second client or reading Keycloak Groups directly. Consequence: a Client Role that becomes a Role Signal stops being synced as a group; any Managed Group it already had is left untouched and reported as an Orphaned Managed Group until an operator deletes it or unsets the signal.

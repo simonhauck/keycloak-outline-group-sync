@@ -35,6 +35,11 @@ for role in team-create team-adopt team-rename team-members team-direct team-dis
   $KCADM create clients/$ROLES_CID/roles -r $REALM -s name=$role
 done
 
+# Role Signals: mapped to Outline Team Roles by the service, never to groups.
+for role in outline-admin outline-viewer; do
+  $KCADM create clients/$ROLES_CID/roles -r $REALM -s name=$role
+done
+
 create_user() {
   local username=$1 email=$2 enabled=${3:-true}
   $KCADM create users -r $REALM -s username=$username -s email=$email \
@@ -54,6 +59,8 @@ create_user admin-sso admin@example.com >/dev/null
 create_user frank frank@example.com >/dev/null
 
 $KCADM add-roles -r $REALM --uid $BOB_ID --cclientid $ROLES_CLIENT --rolename team-direct
+$KCADM add-roles -r $REALM --uid $ALICE_ID --cclientid $ROLES_CLIENT --rolename outline-admin
+$KCADM add-roles -r $REALM --uid $BOB_ID --cclientid $ROLES_CLIENT --rolename outline-viewer
 $KCADM add-roles -r $REALM --uid $DAVE_ONE_ID --cclientid $ROLES_CLIENT --rolename team-duplicate
 $KCADM add-roles -r $REALM --uid $DAVE_TWO_ID --cclientid $ROLES_CLIENT --rolename team-duplicate
 $KCADM add-roles -r $REALM --uid $ERIN_ID --cclientid $ROLES_CLIENT --rolename team-noaccount
