@@ -1,29 +1,30 @@
 # Keycloak → Outline Group Sync
 
-A small self-hosted Sync Service that keeps [Outline](https://www.getoutline.com) group membership in sync with [Keycloak](https://www.keycloak.org), so access to Outline collections is granted through Keycloak and never maintained twice.
+A small self-hosted Sync Service that keeps [Outline](https://www.getoutline.com) group membership and team roles in sync with [Keycloak](https://www.keycloak.org), so access to Outline collections is granted through Keycloak and never maintained twice.
 
-Every **Client Role** on one configured Keycloak client maps one-to-one to an **Outline Group**, and the group's membership is a **Full State Sync** of the role's holders. Granting access is a pure Keycloak operation; revoking it is too.
+Every **Client Role** on one configured Keycloak client maps one-to-one to an **Outline Group**, and the group's membership is a **Full State Sync** of the role's holders. Client Roles named as **Role Signals** instead drive each Outline Account's **Team Role** (`Admin`, `Member`, `Viewer` or `Guest`). Granting access is a pure Keycloak operation; revoking it is too.
 
 ## How it works
 
 - The Sync Service polls Keycloak on a schedule and reads every Client Role of the configured client, plus each user's effective client role mappings — direct assignments and roles inherited through Keycloak Groups and their ancestors.
 - Each Client Role maps to an Outline Group named exactly after the role, tagged with a stable external id: `keycloak:<realm>:<roles-client-id>:<role-uuid>`. Roles with no holders still get their group.
 - An existing unmanaged group whose name matches a Client Role is adopted (and tagged) rather than duplicated, so you can migrate without recreating access grants. Groups that already carry an external id from another tool are left alone and a new Managed Group is created. Adoption starts reconciling membership immediately, so pre-existing extra members are removed on that first run.
-- Role Holders are matched to existing Outline Accounts by lowercased exact email; missing members are added and extra members are removed.
-- An Outline Account whose email is shared by several enabled Keycloak users is never modified — neither added nor removed — because the service cannot know which user owns it.
+- Client Roles named in a `TEAM_ROLE_*` variable are **Role Signals**: they never become groups. Instead, every Managed Account's Team Role is the highest signal it holds — Admin > Member > Viewer > Guest — or the Fallback Team Role (`Viewer` by default) when it holds none. The token owner's account is skipped because Outline forbids changing your own role.
+- Role Holders are matched to existing Outline Accounts by lowercased exact email; missing members are added and extra members are removed. Team Roles are written with `users.update_role` only when the role actually differs, so runs are idempotent.
+- An Outline Account whose email is shared by several enabled Keycloak users is never modified — neither added nor removed, nor given a Team Role — because the service cannot know which user owns it.
 - A run reads the complete state from Keycloak before writing anything. If any read fails, in Keycloak or in Outline, the run aborts before touching Outline.
 - Transient failures and Outline rate limits are handled by the next Sync Run; runs are idempotent, so an initial sync of a large client may take a few intervals. See [ADR-0005](docs/adr/0005-next-run-is-the-retry.md).
 
 ## Guarantees and boundaries
 
-- **Membership only.** The service never creates, invites, suspends or deletes Outline Accounts, and never changes team roles or collection permissions.
-- **Keycloak is the source of truth.** Manual membership edits to Managed Groups in Outline are overwritten on the next Sync Run.
+- **Membership and Team Roles only.** The service never creates, invites, suspends or deletes Outline Accounts, and never changes collection permissions. It does own the Team Role of every Managed Account.
+- **Keycloak is the source of truth.** Manual membership edits to Managed Groups in Outline are overwritten on the next Sync Run, and a Managed Account's Team Role is recomputed from its Role Signals on every run. An Outline Account with no Keycloak counterpart is never touched.
 - **Unmanaged Outline Groups are never touched.** Groups that do not match a Client Role are left alone, including their membership.
-- **Orphaned Managed Groups are preserved.** If a Client Role is deleted, its group, members and access grants stay as they are and the group is reported as orphaned on each run.
+- **Orphaned Managed Groups are preserved.** If a Client Role is deleted or becomes a Role Signal, its group, members and access grants stay as they are and the group is reported as orphaned on each run.
 - **No writes to Keycloak.** The sync is one-way.
-- **Users arrive through SSO.** A Role Holder gains Outline Group membership only after their first SSO login creates their Outline Account plus one Sync Run.
-- **Disabled users are excluded,** so a user disabled in Keycloak is removed from their Managed Groups on the next run.
-- **Ambiguous users are left alone.** When several Keycloak users share an email, the Outline Account behind it is neither added nor removed.
+- **Users arrive through SSO.** A Role Holder gains Outline Group membership, and a Role Signal gains a Team Role, only after the first SSO login creates the Outline Account plus one Sync Run.
+- **Disabled users are excluded,** so a user disabled in Keycloak is removed from their Managed Groups and falls back to the Fallback Team Role on the next run.
+- **Ambiguous users are left alone.** When several Keycloak users share an email, the Outline Account behind it is neither added nor removed, and its Team Role is not changed.
 
 The full vocabulary and the decisions behind these rules live in [CONTEXT.md](CONTEXT.md) and [`docs/adr/`](docs/adr).
 
@@ -70,13 +71,19 @@ Choose the client whose Client Roles will define your Outline Groups. It can be 
 
 If the roles live on a different client than the sync service account, set `KEYCLOAK_ROLES_CLIENT_ID` to that client's id.
 
-### 2. Keycloak Groups
+### 2. Role Signals (optional)
+
+To let Keycloak control Outline's team roles, name one or more Client Roles per Team Role in the `TEAM_ROLE_*` variables — for example `TEAM_ROLE_ADMIN=outline-admin`. A Role Signal never becomes an Outline Group; it only sets the holder's Team Role to the highest signal matched: Admin > Member > Viewer > Guest. Every Managed Account without a signal gets `TEAM_ROLE_FALLBACK`, `viewer` by default.
+
+Role names are matched exactly and may be listed once, under one Team Role. Signals can be granted directly or bundled through Keycloak Groups like any other Client Role.
+
+### 3. Keycloak Groups
 
 Create Keycloak Groups that bundle the roles, and map the Client Roles to those groups. Add users to the groups. Role mappings are inherited from parent groups to child groups, so hierarchies work as expected.
 
 Users can also receive a role by direct assignment. Disabled users, users without an email and users sharing an email are skipped, with a warning.
 
-### 3. Sync service account
+### 4. Sync service account
 
 Create a confidential client for the service with **Service accounts enabled** (client credentials). Copy its secret into `KEYCLOAK_CLIENT_SECRET`.
 
@@ -112,13 +119,18 @@ All configuration comes from environment variables; there is no config file.
 | `KEYCLOAK_CLIENT_ID` | yes | – | Confidential client used for the client-credentials grant |
 | `KEYCLOAK_CLIENT_SECRET` | yes | – | Secret of that client |
 | `KEYCLOAK_ROLES_CLIENT_ID` | no | `KEYCLOAK_CLIENT_ID` | Client whose Client Roles map to Outline Groups |
+| `TEAM_ROLE_ADMIN` | no | – | Comma-separated Client Role names whose holders become Outline team admins |
+| `TEAM_ROLE_MEMBER` | no | – | Comma-separated Client Role names whose holders become Outline team members |
+| `TEAM_ROLE_VIEWER` | no | – | Comma-separated Client Role names whose holders become Outline team viewers |
+| `TEAM_ROLE_GUEST` | no | – | Comma-separated Client Role names whose holders become Outline guests |
+| `TEAM_ROLE_FALLBACK` | no | `viewer` | Team Role for Managed Accounts without a Role Signal: `guest`, `viewer` or `member` |
 | `OUTLINE_URL` | yes | – | Base URL of Outline, e.g. `https://outline.example.com` |
 | `OUTLINE_TOKEN` | yes | – | API key created by a team admin |
 | `SYNC_INTERVAL` | no | `5m` | Time between Sync Runs; a positive Go duration such as `30s`, `5m`, `1h` |
 | `DRY_RUN` | no | `false` | Log the plan without writing to Outline |
 | `LOG_LEVEL` | no | `info` | `debug`, `info`, `warn` or `error` |
 
-Missing or invalid settings fail fast at startup with an error naming the setting. `KEYCLOAK_URL` and `OUTLINE_URL` must use `http` or `https`.
+Missing or invalid settings fail fast at startup with an error naming the setting. `KEYCLOAK_URL` and `OUTLINE_URL` must use `http` or `https`. A `TEAM_ROLE_*` role name that does not exist on the roles client aborts the Sync Run before any write, and so does a name listed under two Team Roles.
 
 ## Running modes
 
@@ -127,14 +139,16 @@ Missing or invalid settings fail fast at startup with an error naming the settin
 
 ## Dry run and rollback
 
-Start with `DRY_RUN=true` and review the logged plan — every intended group create, adoption and rename and every member addition and removal, with a summary. Runs in dry-run mode write nothing.
+Start with `DRY_RUN=true` and review the logged plan — every intended group create, adoption and rename, every member addition and removal, and every Team Role change, with a summary. Runs in dry-run mode write nothing.
 
-To roll back: stop the container. The Sync Service never deletes groups and never manages accounts or permissions, so the last applied state stays in place. To undo a membership change, adjust Keycloak and run again, or edit the group in Outline — but remember that Managed Groups are reconciled on every run, so manual edits are temporary.
+To roll back: stop the container. The Sync Service never deletes groups and never creates or deletes accounts, so the last applied state stays in place. To undo a membership or Team Role change, adjust Keycloak and run again, or edit the group in Outline — but remember that Managed Groups and Managed Accounts are reconciled on every run, so manual edits are temporary.
 
 ## Troubleshooting
 
 - **A user is not added.** Look for a `skipping Keycloak user` warning: the user may be disabled, have no email, share an email with another user, or have no Outline Account yet (they need one SSO login first).
-- **An orphaned group warning.** The Client Role behind that group no longer exists. The group and its access grants are left untouched; delete the role only if you intend that, or recreate it to resume syncing.
+- **Everyone became a Viewer.** No `TEAM_ROLE_*` signal is configured, so every Managed Account falls back to `TEAM_ROLE_FALLBACK`. Configure the signals, or change the fallback, and run again.
+- **Team Role writes fail with an authorization error.** Outline versions that gate guest access reject `Guest` without the Guests entitlement. Community self-hosted instances should use `TEAM_ROLE_FALLBACK=viewer` (or `member`).
+- **An orphaned group warning.** The Client Role behind that group no longer exists or became a Role Signal. The group and its access grants are left untouched; delete the group, or unset the signal, to resolve it.
 - **The first sync takes several runs.** Outline rate-limits its API (by default 1000 requests/60s; `groups.create` at 10/min). Each run makes as much progress as it can and the next one continues. Self-hosters with a very large first sync can raise Outline's `RATE_LIMITER_MULTIPLIER` or `RATE_LIMITER_REQUESTS`.
 - **No writes happen at all.** A read failed — in Keycloak or in Outline — so the run aborted before writing anything. The error is in the logs.
 

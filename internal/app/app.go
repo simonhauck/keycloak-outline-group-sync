@@ -23,6 +23,8 @@ type config struct {
 	syncInterval         time.Duration
 	dryRun               bool
 	logLevel             slog.Level
+	teamRoleSignals      []teamRoleSignal
+	teamRoleFallback     teamRole
 }
 
 // RunOnce performs a single Sync Run using the configuration from the process
@@ -127,6 +129,18 @@ func loadConfig() (config, error) {
 		}
 		cfg.logLevel = level
 	}
+
+	signals, err := loadTeamRoleSignals()
+	if err != nil {
+		return config{}, err
+	}
+	cfg.teamRoleSignals = signals
+
+	fallback, err := loadFallbackTeamRole()
+	if err != nil {
+		return config{}, err
+	}
+	cfg.teamRoleFallback = fallback
 
 	return cfg, nil
 }

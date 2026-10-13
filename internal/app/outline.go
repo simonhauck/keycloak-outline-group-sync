@@ -22,6 +22,7 @@ type outlineGroup struct {
 type outlineUser struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
+	Role  string `json:"role"`
 }
 
 type outlineClient struct {
@@ -68,24 +69,40 @@ func (o *outlineClient) updateGroup(ctx context.Context, id, name, externalID st
 	return group, err
 }
 
-func (o *outlineClient) listUsersByEmails(ctx context.Context, emails []string) ([]outlineUser, error) {
+func (o *outlineClient) listUsers(ctx context.Context) ([]outlineUser, error) {
 	var users []outlineUser
-	for start := 0; start < len(emails); start += outlinePageSize {
-		batch := emails[start:min(start+outlinePageSize, len(emails))]
-		for offset := 0; ; {
-			var page []outlineUser
-			_, err := o.call(ctx, "users.list", map[string]any{"emails": batch, "limit": outlinePageSize, "offset": offset}, &page)
-			if err != nil {
-				return nil, err
-			}
-			users = append(users, page...)
-			if len(page) == 0 {
-				break
-			}
-			offset += len(page)
+	for offset := 0; ; {
+		var page []outlineUser
+		_, err := o.call(ctx, "users.list", map[string]any{"limit": outlinePageSize, "offset": offset}, &page)
+		if err != nil {
+			return nil, err
 		}
+		users = append(users, page...)
+		if len(page) == 0 {
+			return users, nil
+		}
+		offset += len(page)
 	}
-	return users, nil
+}
+
+func (o *outlineClient) currentUserID(ctx context.Context) (string, error) {
+	var data struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if _, err := o.call(ctx, "auth.info", map[string]any{}, &data); err != nil {
+		return "", err
+	}
+	if data.User.ID == "" {
+		return "", fmt.Errorf("outline auth.info returned no user")
+	}
+	return data.User.ID, nil
+}
+
+func (o *outlineClient) updateUserRole(ctx context.Context, userID string, role teamRole) error {
+	_, err := o.call(ctx, "users.update_role", map[string]any{"id": userID, "role": string(role)}, nil)
+	return err
 }
 
 func (o *outlineClient) groupMembers(ctx context.Context, groupID string) ([]outlineUser, error) {

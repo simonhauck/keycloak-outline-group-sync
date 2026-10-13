@@ -23,11 +23,13 @@ import (
 )
 
 const (
-	composeFile = "docker-compose.yml"
-	outlineURL  = "http://localhost:13000"
-	keycloakURL = "http://127.0.0.1:18080"
-	realm       = "e2e"
-	rolesClient = "roles-client"
+	composeFile      = "docker-compose.yml"
+	outlineURL       = "http://localhost:13000"
+	keycloakURL      = "http://127.0.0.1:18080"
+	realm            = "e2e"
+	rolesClient      = "roles-client"
+	signalRoleAdmin  = "outline-admin"
+	signalRoleViewer = "outline-viewer"
 )
 
 type stack struct {
@@ -87,12 +89,31 @@ func TestSyncServiceAgainstRealDependencies(t *testing.T) {
 		}
 		for _, want := range []string{
 			`"groupsCreated":0`, `"groupsAdopted":0`, `"groupsRenamed":0`,
-			`"membersAdded":0`, `"membersRemoved":0`, `"failures":0`,
+			`"membersAdded":0`, `"membersRemoved":0`, `"teamRolesChanged":0`, `"failures":0`,
 		} {
 			if !strings.Contains(output, want) {
 				t.Fatalf("no-op run summary does not contain %s:\n%s", want, output)
 			}
 		}
+	})
+
+	t.Run("syncs team roles from role signals", func(t *testing.T) {
+		s.assertUserRole(t, "alice@example.com", "admin")
+		s.assertUserRole(t, "bob@example.com", "viewer")
+		s.assertUserRole(t, "carol@example.com", "member")
+		for _, group := range s.groups(t) {
+			if group.Name == signalRoleAdmin || group.Name == signalRoleViewer {
+				t.Fatalf("a Role Signal became an Outline Group: %+v", group)
+			}
+		}
+
+		s.removeClientRole(t, "bob", signalRoleViewer)
+		output := s.mustRunSync(t, nil)
+		if !strings.Contains(output, `"teamRolesChanged":1`) {
+			t.Fatalf("the Sync Run did not report the Team Role change:\n%s", output)
+		}
+		s.assertUserRole(t, "bob@example.com", "member")
+		s.assertUserRole(t, "alice@example.com", "admin")
 	})
 
 	t.Run("removes members disables users and renames roles", func(t *testing.T) {
@@ -235,7 +256,12 @@ func (s *stack) compose(args ...string) (string, error) {
 
 func (s *stack) runSync(t *testing.T, env map[string]string) (string, error) {
 	t.Helper()
-	effective := map[string]string{"OUTLINE_TOKEN": s.apiKey}
+	effective := map[string]string{
+		"OUTLINE_TOKEN":      s.apiKey,
+		"TEAM_ROLE_ADMIN":    signalRoleAdmin,
+		"TEAM_ROLE_VIEWER":   signalRoleViewer,
+		"TEAM_ROLE_FALLBACK": "member",
+	}
 	for key, value := range env {
 		effective[key] = value
 	}
@@ -473,6 +499,39 @@ func (s *stack) assertManaged(t *testing.T, groupName string) {
 	}
 }
 
+type outlineAccount struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
+func (s *stack) outlineUsers(t *testing.T) []outlineAccount {
+	t.Helper()
+	var all []outlineAccount
+	for offset := 0; ; {
+		var page []outlineAccount
+		s.outline(t, "users.list", map[string]any{"limit": 100, "offset": offset}, &page)
+		all = append(all, page...)
+		if len(page) == 0 {
+			return all
+		}
+		offset += len(page)
+	}
+}
+
+func (s *stack) assertUserRole(t *testing.T, email, want string) {
+	t.Helper()
+	for _, user := range s.outlineUsers(t) {
+		if user.Email == email {
+			if user.Role != want {
+				t.Fatalf("Outline Account %s has Team Role %q, want %q", email, user.Role, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("no Outline Account with email %s", email)
+}
+
 func (s *stack) snapshot(t *testing.T) string {
 	t.Helper()
 	var lines []string
@@ -480,8 +539,34 @@ func (s *stack) snapshot(t *testing.T) string {
 		lines = append(lines, fmt.Sprintf("%s|%s|%s",
 			group.Name, group.ExternalID, strings.Join(s.members(t, group.ID), ",")))
 	}
+	for _, user := range s.outlineUsers(t) {
+		lines = append(lines, fmt.Sprintf("user|%s|%s", user.Email, user.Role))
+	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
+}
+
+func (s *stack) rolesClientUUID(t *testing.T) string {
+	t.Helper()
+	var clients []struct {
+		ID       string `json:"id"`
+		ClientID string `json:"clientId"`
+	}
+	s.keycloak(t, http.MethodGet, "/clients?clientId="+url.QueryEscape(rolesClient), nil, &clients)
+	if len(clients) != 1 {
+		t.Fatalf("expected exactly one %q client, got %+v", rolesClient, clients)
+	}
+	return clients[0].ID
+}
+
+func (s *stack) removeClientRole(t *testing.T, username, roleName string) {
+	t.Helper()
+	user := s.keycloakUser(t, username)
+	clientUUID := s.rolesClientUUID(t)
+	var role keycloakRef
+	s.keycloak(t, http.MethodGet, "/clients/"+clientUUID+"/roles/"+url.PathEscape(roleName), nil, &role)
+	s.keycloak(t, http.MethodDelete, "/users/"+user.ID+"/role-mappings/clients/"+clientUUID,
+		[]map[string]string{{"id": role.ID, "name": role.Name}}, nil)
 }
 
 func (s *stack) removeFromKeycloakGroup(t *testing.T, username, groupName string) {
